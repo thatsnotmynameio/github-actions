@@ -114,10 +114,12 @@ jobs:
                                       or (.value | type) != "string" or (.value | test("[\r\n]")))
               then error("env: a map of variable names to one-line strings") else . end
           ' <<< "$json")"
+          # The environment goes in base64: the runner drops a job output that
+          # looks like it holds a secret, such as a URL's password.
           {
             echo "matrix=$matrix"
             echo "services=$services"
-            echo "env=$env"
+            echo "env=$(base64 -w0 <<< "$env")"
           } >> "$GITHUB_OUTPUT"
 
   # Linux alone checks the coverage floor (the action runs in Docker, which
@@ -228,7 +230,7 @@ jobs:
           if [ "${#services[@]}" -gt 0 ]; then
             docker compose up --wait --wait-timeout 60 "${services[@]}"
           fi
-          jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$TEST_ENV" >> "$GITHUB_ENV"
+          base64 -d <<< "$TEST_ENV" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
       - name: go test
         if: ${{ !cancelled() }}
         run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...

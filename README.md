@@ -15,6 +15,8 @@ A ruleset runs them only on `pull_request` and `merge_group`, and ignores their 
 
 Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
+zizmor honors no `# zizmor: ignore` comment and no `ignore` list in its configuration, which a pull request could use to hide its own finding: a rule turned off with `disable: true` in the configuration on `main` is the only way to silence zizmor in a repository. An exception to a single finding is a dismissal of its code scanning alert, which an organization owner or security manager approves.
+
 ### zizmor and code scanning
 
 On a public repository, zizmor's findings go to code scanning under the category `zizmor`, and the ruleset's code scanning rule blocks a pull request that adds one. Code scanning compares the pull request with the analysis of `main`, so a public repository also runs zizmor on each push to `main`:

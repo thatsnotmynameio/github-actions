@@ -37,8 +37,13 @@ jobs:
       contents: read
       security-events: write # uploads the results to code scanning
     steps:
+      # On a pull request, its head commit, not the merge commit GitHub tests
+      # it with: GitHub makes a new merge commit when it rechecks the pull
+      # request, a merge attempt included, and code scanning then waits for
+      # results on the new one. The head commit stays until the next push.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       # Only the configuration files, at the base commit; on a push, at the
       # pushed commit.
@@ -82,6 +87,11 @@ jobs:
         with:
           sarif_file: ${{ steps.scan.outputs.sarif }}
           category: grype
+          # On a pull request, the results go to its head commit, which code
+          # scanning accepts as the pull request's; elsewhere, to the run's
+          # ref and commit.
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+          sha: ${{ github.event.pull_request.head.sha || '' }}
       - name: Findings
         if: ${{ github.event.repository.private }}
         env:

@@ -1,0 +1,178 @@
+# CodeQL's advanced setup, with the security-extended suite, published to
+# code scanning: the Go module, test files included, when the repository has
+# go.mod, and the GitHub Actions workflows. A repository calls it with
+# workflow_call from its own workflow, on every pull request, on each push to
+# main and daily: GitHub does not allow CodeQL's init and analyze actions in a
+# workflow a ruleset requires, so no organization ruleset can run it.
+#
+#   jobs:
+#     codeql:
+#       permissions:
+#         contents: read
+#         security-events: write
+#       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # main
+#
+# Its checks are "<caller job> / codeql (go)" and "<caller job> / codeql
+# (actions)". Code scanning tells analyses apart by the caller's workflow and
+# job, the category (/language:go, /language:actions) and the matrix values
+# (language, build-mode): a change to any of them leaves the old analysis's
+# alerts open on main.
+# The configuration (.github/codeql/codeql-config.yml) comes from the base
+# commit, never from the pull request: a pull request cannot exclude a path or
+# a query for itself. Without one, the security-extended suite runs.
+# Its alerts do not fail the jobs: a code_scanning rule does. A job fails on
+# a build or analysis error, and then uploads nothing. No job holds a secret:
+# code scanning accepts an upload from any run that the pull_request event
+# started, a fork's included, with the read-only token.
+name: codeql
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # The languages to analyze: Go when the commit has go.mod, and always the
+  # workflows of the repository that calls this one.
+  setup:
+    name: codeql (setup)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.languages.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+          sparse-checkout-cone-mode: false
+      - id: languages
+        name: Languages
+        run: |
+          matrix='[{"language": "actions", "build-mode": "none"}]'
+          if [ -f go.mod ]; then
+            matrix='[{"language": "go", "build-mode": "manual"}, {"language": "actions", "build-mode": "none"}]'
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  codeql:
+    name: codeql (${{ matrix.language }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write # uploads the results to code scanning
+    # A pull request's newer run replaces the older one. Each main commit gets
+    # a group of its own and is never cancelled.
+    concurrency:
+      group: ${{ github.workflow }}-codeql-${{ matrix.language }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      # On a pull request, its head commit, not the test merge commit: GitHub
+      # makes a new merge commit when it rechecks the pull request (a ruleset
+      # change or a merge attempt), and code scanning then waits for results
+      # on the new one. The head commit stays until the next push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # Only the configuration, at the base commit; on a push, at the pushed
+      # commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/codeql/codeql-config.yml
+          sparse-checkout-cone-mode: false
+      # Inside the workspace, where CodeQL's init requires it.
+      - id: base
+        name: Configuration from the base
+        run: |
+          file=""
+          if [ -f .base-config/.github/codeql/codeql-config.yml ]; then
+            cp .base-config/.github/codeql/codeql-config.yml .codeql-base-config.yml
+            file=./.codeql-base-config.yml
+          fi
+          rm -rf .base-config
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      # Before CodeQL's init, so its extractor uses this Go.
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ${{ steps.base.outputs.file }}
+          queries: ${{ steps.base.outputs.file == '' && 'security-extended' || '' }}
+      # The Go extractor sees only the go commands this step runs. go build
+      # extracts no test file, and the extract_tests option does not apply to a
+      # traced build: only a traced go test does, and only with build flags,
+      # since the extractor hands them to go list (-run makes it fail and skip
+      # every test). So the step compiles the test binaries with go test -c,
+      # which runs no test. go test -c -o dir/ names a binary after its
+      # package's last path element (cmd/crew and internal/crew are both
+      # crew.test), so packages that share one go in separate batches.
+      - name: build
+        if: matrix.language == 'go'
+        run: |
+          out="$RUNNER_TEMP/codeql-tests"
+          mkdir -p "$out"
+          go build ./...
+          go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... |
+            awk -F/ 'NF { print ++seen[$NF], $0 }' > "$out/packages"
+          while read -r batch; do
+            mapfile -t packages < <(awk -v batch="$batch" '$1 == batch { print $2 }' "$out/packages")
+            go test -c -o "$out/$batch/" "${packages[@]}"
+          done < <(cut -d' ' -f1 "$out/packages" | sort -un)
+      - id: analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}
+          upload: never
+          output: ${{ runner.temp }}/codeql-results
+      # A database without the tests would upload as a complete analysis and
+      # mark their alerts fixed: a failed build of the tests does not fail the
+      # extraction. So the job checks the Go database's source archive, which
+      # lists every file extracted, before it uploads. A module without test
+      # files has none to miss.
+      - name: extracted files
+        if: matrix.language == 'go'
+        env:
+          DB_LOCATIONS: ${{ steps.analyze.outputs.db-locations }}
+        run: |
+          if [ -z "$(git ls-files -- '*_test.go')" ]; then
+            echo "No test file in the module."
+            exit 0
+          fi
+          database="$(jq -r .go <<< "$DB_LOCATIONS")"
+          unzip -Z1 "$database/src.zip" | awk -v root="${GITHUB_WORKSPACE#/}/" '
+            index($0, root) != 1 || !/\.go$/ { next }
+            { path = substr($0, length(root) + 1) }
+            path ~ /_test\.go$/ { tests++ }
+            END {
+              printf "test files: %d\n", tests
+              if (!tests) {
+                print "::error::The Go database is missing the test files."
+                exit 1
+              }
+            }'
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-results
+          category: /language:${{ matrix.language }}
+          # On a pull request, filed under its head commit; elsewhere, under the
+          # run's ref and commit.
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+          sha: ${{ github.event.pull_request.head.sha || '' }}

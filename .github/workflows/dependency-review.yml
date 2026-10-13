@@ -1,0 +1,90 @@
+# The dependencies a pull request adds, through GitHub's dependency review: a
+# license off the organization's allowlist below, or a known vulnerability of
+# any severity, fails the check. An organization ruleset requires it on every
+# pull request of the repositories it targets, so a repository needs no file
+# of its own, and a pull request cannot change or skip it.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# Dependency review needs GitHub Code Security on a private repository: it
+# runs on public repositories and on private ones whose custom property tier
+# is private-licensed. Elsewhere, and on a merge group or a push, which have
+# no pull request to compare, the job passes with a notice.
+# The allowlist and the failure policy are the organization's: a repository
+# cannot change them. Its own exceptions, a package's license
+# (allow-dependencies-licenses) or an advisory (allow-ghsas), each with a
+# comment giving the reason, go in .github/dependency-review.yml, read from
+# the base branch, never from the pull request.
+name: "tnmn.io: dependency-review"
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: "tnmn.io: dependency-review"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: applies
+        name: Whether dependency review applies
+        env:
+          EVENT: ${{ github.event_name }}
+          PRIVATE: ${{ github.event.repository.private }}
+          TIER: ${{ github.event.repository.custom_properties.tier }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "::notice::No pull request to compare on $EVENT: nothing to review."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ "$PRIVATE" = true ] && [ "$TIER" != private-licensed ]; then
+            echo "::notice::Dependency review needs GitHub Code Security on a private repository (tier: ${TIER:-unset})."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Only the exceptions file, at the base commit.
+      - if: steps.applies.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/dependency-review.yml
+          sparse-checkout-cone-mode: false
+      - id: exceptions
+        name: Exceptions from the base
+        if: steps.applies.outputs.run == 'true'
+        run: |
+          file=""
+          if [ -f .base-config/.github/dependency-review.yml ]; then
+            cp .base-config/.github/dependency-review.yml .dependency-review-base.yml
+            file=./.dependency-review-base.yml
+          fi
+          rm -rf .base-config
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      # The inputs override the same keys of the exceptions file, so a
+      # repository can add exceptions but not change the policy.
+      - if: steps.applies.outputs.run == 'true'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          config-file: ${{ steps.exceptions.outputs.file }}
+          # MIT-0, BSD-2-Clause, ISC and 0BSD are permissive licenses that ask
+          # no more than a notice. LicenseRef-scancode-google-patent-license-golang
+          # is Go's golang.org/x modules', with BSD-3-Clause. No copyleft license
+          # is on the list: adding one, or any other license, is a decision
+          # made here.
+          allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, LicenseRef-scancode-google-patent-license-golang
+          # Every new vulnerability, whatever its severity and scope. Set here
+          # so that the exceptions file cannot turn a check off or make it warn.
+          fail-on-severity: low
+          fail-on-scopes: runtime, development, unknown
+          license-check: true
+          vulnerability-check: true
+          warn-only: false
+          # A comment would need pull-requests: write.
+          comment-summary-in-pr: never

@@ -1,0 +1,101 @@
+# Releases a Go module's commit, called with workflow_call from a repository's
+# own workflow, started by hand on main: the version the VERSION file names
+# there, tag vX.Y.Z and a GitHub release whose archives, and each binary
+# inside them, carry a signed build-provenance attestation. A run started on
+# another branch is skipped. The caller grants contents: write, id-token:
+# write and attestations: write, and runs one release at a time:
+#
+#   on:
+#     workflow_dispatch:
+#   permissions: {}
+#   concurrency:
+#     group: release
+#     cancel-in-progress: false
+#   jobs:
+#     release:
+#       permissions:
+#         contents: write
+#         id-token: write
+#         attestations: write
+#       uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # main
+#
+# The run fails when its tag already exists, or when GoReleaser finds the tag
+# is not semantic. GoReleaser (the repository's .goreleaser.yaml) then builds
+# and publishes the release with the archives and checksums.txt, with notes
+# made from the commits since the last tag; GitHub creates the tag at the
+# built commit. actions/attest then attests the archives and the binaries,
+# through GitHub's artifact attestations, signed by this workflow:
+#
+#   gh attestation verify <file> --repo <owner>/<repo> \
+#     --signer-workflow thatsnotmynameio/github-actions/.github/workflows/go-release.yml \
+#     --source-ref refs/heads/main
+#
+# A run that fails before GoReleaser publishes is started again. One that
+# fails after it, the attestation included, leaves a published release and
+# its tag: delete both, then start again.
+name: go release
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  release:
+    name: release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # the release and its assets
+      id-token: write # the OIDC token Sigstore certifies the attestation with
+      attestations: write # stores the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the release rule reads the v* tags
+          persist-credentials: false
+      # No module cache: the binaries released are built only from what this
+      # run downloads, never from a cache another workflow could have written.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Local only: GoReleaser reads the version from it, and GitHub creates
+      # the tag when the release is published. Fails when the tag exists: the
+      # checkout fetched every tag.
+      - name: Tag the release locally
+        run: git tag "v$(cat VERSION)"
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.2
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      # Every archive and every binary GoReleaser built, from its list of
+      # artifacts, so that an installed binary can be verified too.
+      - id: subjects
+        name: Files to attest
+        run: |
+          {
+            echo "paths<<EOF"
+            jq -r '.[] | select(.type == "Archive" or .type == "Binary") | .path' dist/artifacts.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if ! jq -e 'any(.[]; .type == "Archive" or .type == "Binary")' dist/artifacts.json > /dev/null; then
+            echo "::error::GoReleaser built no archive or binary to attest."
+            exit 1
+          fi
+      # SLSA build provenance for each of them.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.subjects.outputs.paths }}
+      # What GoReleaser produced, to see why a run failed.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: dist
+          path: dist
+          overwrite: true
+          retention-days: 7

@@ -12,10 +12,12 @@ The organization's rulesets run these workflows on the pull requests of the repo
 | `.github/workflows/zizmor.yml` | `tnmn.io: zizmor` | zizmor's security audit of the workflows, composite actions and Dependabot configuration |
 | `.github/workflows/grype.yml` | `tnmn.io: grype` | Grype: vulnerable dependencies and malicious packages in every manifest |
 | `.github/workflows/dependency-review.yml` | `tnmn.io: dependency-review` | the dependencies a pull request adds: a license off the organization's allowlist, or a known vulnerability, fails it. Public repositories and private ones with `tier: private-licensed` only |
+| `.github/workflows/go.yml` | `tnmn.io: go` | a Go module's checks on Linux and macOS: tidy `go.mod`, gofmt, vet, golangci-lint, tests with the race detector, the coverage floor and govulncheck; then a snapshot of the GoReleaser build. Go repositories only |
+| `.github/workflows/codeql-go.yml` | `tnmn.io: codeql (go)` | CodeQL's analysis of a Go module, test files included. Go repositories only; public repositories and private ones with `tier: private-licensed` |
 
 A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters.
 
-Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, and dependency review's exceptions in `.github/dependency-review.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
+Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's exceptions in `.github/dependency-review.yml`, and for Go `.github/go.yml`, `.golangci.yml` and `.github/codeql/codeql-config.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
 zizmor honors no `# zizmor: ignore` comment and no `ignore` list in its configuration, which a pull request could use to hide its own finding: a rule turned off with `disable: true` in the configuration on `main` is the only way to silence zizmor in a repository. An exception to a single finding is a dismissal of its code scanning alert, which an organization owner or security manager approves.
 
@@ -40,3 +42,94 @@ jobs:
 ```
 
 A private repository without GitHub Code Security has no code scanning: there the findings only show in the job's log, the check never fails on them, and the repository needs no file.
+
+## Go
+
+A Go repository's pull requests get `tnmn.io: go` and `tnmn.io: codeql (go)`. What the pull request builds and tests is its own (`go.mod`, the code, `.goreleaser.yaml`, the Compose file of the test services); the settings that could turn a check off come from the base commit:
+
+- `.golangci.yml` (or `.yaml`): golangci-lint's configuration. Without one, golangci-lint runs with its defaults.
+- `.github/codeql/codeql-config.yml`: CodeQL's configuration. Without one, the `security-extended` suite runs.
+- `.github/go.yml`: the systems the tests run on, the coverage floor, and the services the tests need:
+
+```yaml
+# The systems the tests run on, linux and macos (both by default).
+systems: [linux, macos]
+# The coverage floor: the least total coverage, in percent, of the statements
+# go test covers on Linux (go tool cover -func's total). None by default.
+coverage: 90
+# Docker Compose services started before the tests, on Linux only (the macOS
+# runners have no Docker), with the environment that points the tests at them.
+services: [test-postgres]
+env:
+  MY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/test?sslmode=disable
+```
+
+govulncheck is the module's own when `go.mod` declares it as a tool, so the version it pins is the one that runs.
+
+golangci-lint's findings go to code scanning under the category `golangci-lint`, and CodeQL's under `/language:go`. Code scanning compares a pull request with the analysis of `main`, so a Go repository also runs both on each push to `main`, CodeQL daily as well:
+
+```yaml
+# .github/workflows/ci.yml
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  go:
+    permissions:
+      contents: read
+      security-events: write
+    uses: thatsnotmynameio/github-actions/.github/workflows/go.yml@<sha> # main
+```
+
+```yaml
+# .github/workflows/security.yml
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 5 * * *"
+
+permissions: {}
+
+jobs:
+  codeql-go:
+    permissions:
+      contents: read
+      security-events: write
+    uses: thatsnotmynameio/github-actions/.github/workflows/codeql-go.yml@<sha> # main
+```
+
+### Releases
+
+`.github/workflows/go-release.yml` releases a Go module with GoReleaser, as the version its `VERSION` file names, and attests every archive and binary with GitHub's artifact attestations. A repository calls it from a workflow it starts by hand on `main`:
+
+```yaml
+# .github/workflows/release.yml
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # main
+```
+
+The attestations are signed by this repository's workflow, so a release is verified with:
+
+```sh
+gh attestation verify <file> --repo <owner>/<repo> \
+  --signer-workflow thatsnotmynameio/github-actions/.github/workflows/go-release.yml \
+  --source-ref refs/heads/main
+```

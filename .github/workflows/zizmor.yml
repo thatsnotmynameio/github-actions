@@ -60,9 +60,23 @@ jobs:
             if [ -f "$f" ]; then cp "$f" "$config"; break; fi
           done
           rm -rf .base-config
+      # zizmor audits workflows, composite actions (action.yml) and Dependabot's
+      # configuration. A repository with none has nothing to audit: the check
+      # passes, and no analysis is uploaded.
+      - id: inputs
+        name: Inputs to audit
+        run: |
+          if compgen -G '.github/workflows/*.y*ml' > /dev/null || compgen -G '.github/dependabot.y*ml' > /dev/null \
+            || [ -n "$(find . -path ./.git -prune -o \( -name action.yml -o -name action.yaml \) -print -quit)" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No workflow, composite action or Dependabot configuration: nothing to audit."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
       # The action runs zizmor's container image, pinned by digest in the
       # action. In SARIF mode zizmor exits 0 on findings.
       - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        if: steps.inputs.outputs.found == 'true'
         continue-on-error: ${{ github.event.repository.private }}
         with:
           persona: regular

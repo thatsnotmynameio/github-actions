@@ -1,0 +1,71 @@
+# zizmor's security audit of a repository's workflows, composite actions and
+# Dependabot configuration. An organization ruleset requires it on every pull
+# request of the repositories it targets, so a repository needs no file of its
+# own, and a pull request cannot change or skip it. A public repository also
+# calls it with workflow_call on each push to main, so code scanning has the
+# analysis of main that a pull request's alerts are compared against.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# The configuration (.github/zizmor.yml or zizmor.yml) comes from the base
+# branch, never from the pull request: a pull request cannot turn a rule off
+# for itself.
+# On a public repository the findings go to code scanning under the category
+# "zizmor", and the code scanning rule of a ruleset blocks the pull requests
+# that add one. A private repository without GitHub Code Security has no code
+# scanning: there the findings only show in the job's log, and the job never
+# fails on them.
+name: tnmn.io
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: "tnmn.io: zizmor"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # uploads the results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only the configuration files, at the base commit; on a push, at the
+      # pushed commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/zizmor.yml
+            .github/zizmor.yaml
+            zizmor.yml
+            zizmor.yaml
+          sparse-checkout-cone-mode: false
+      # Always passed explicitly, with no rule when the base has none, so
+      # zizmor never finds the pull request's own file. Inside the workspace:
+      # the action mounts only the workspace into zizmor's container.
+      - name: Configuration from the base
+        run: |
+          config=.zizmor-base-config.yml
+          echo 'rules: {}' > "$config"
+          for f in .base-config/.github/zizmor.yml .base-config/.github/zizmor.yaml .base-config/zizmor.yml .base-config/zizmor.yaml; do
+            if [ -f "$f" ]; then cp "$f" "$config"; break; fi
+          done
+          rm -rf .base-config
+      # The action runs zizmor's container image, pinned by digest in the
+      # action. In SARIF mode zizmor exits 0 on findings.
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        continue-on-error: ${{ github.event.repository.private }}
+        with:
+          persona: regular
+          online-audits: true
+          advanced-security: ${{ !github.event.repository.private }}
+          config: .zizmor-base-config.yml

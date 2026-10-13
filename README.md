@@ -4,7 +4,7 @@ Shared workflows and actions of thatsnotmynameio's repositories, and the checks 
 
 ## Checks required by the organization
 
-The organization's rulesets (managed in [thatsnotmynameio/admin](https://github.com/thatsnotmynameio/admin)) run these workflows on the pull requests of the repositories they target, pinned by SHA. A repository needs no file of its own, and a pull request cannot change or skip them. Their checks carry the `tnmn.io:` prefix, so they never share a name with a repository's own checks.
+The organization's rulesets run these workflows on the pull requests of the repositories they target, pinned by SHA. A repository needs no file of its own, and a pull request cannot change or skip them. Their checks carry the `tnmn.io:` prefix, so they never share a name with a repository's own checks.
 
 | Workflow | Check | What it does |
 | --- | --- | --- |

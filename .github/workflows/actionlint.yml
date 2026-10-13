@@ -7,7 +7,7 @@
 # merge_group.
 # The configuration (.github/actionlint.yaml) comes from the base branch, never
 # from the pull request: a pull request cannot turn a rule off for itself.
-name: tnmn.io
+name: "tnmn.io: actionlint"
 
 on:
   pull_request:

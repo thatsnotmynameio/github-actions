@@ -1,0 +1,281 @@
+# A Go module's checks, on each system it ships for: tidy go.mod, formatting,
+# vet, golangci-lint, tests with the race detector and coverage, the coverage
+# floor, and known vulnerabilities; then a snapshot of the release build. An
+# organization ruleset requires it on every pull request of the Go
+# repositories it targets, so a repository needs no file of its own, and a
+# pull request cannot change or skip it. A repository also calls it with
+# workflow_call on each push to main, which gives code scanning the analysis
+# of main that a pull request's golangci-lint alerts are compared against.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# The settings that could turn a check off come from the base commit, never
+# from the pull request: .github/go.yml, golangci-lint's .golangci.yml (or
+# .yaml) and the coverage floor's .testcoverage.yml. A change to them applies
+# once it merges. What the pull request builds and tests is its own: go.mod,
+# the code, .goreleaser.yaml and the Compose file of the test services.
+# A repository without go.mod has nothing to check: only the setup job runs.
+# No job holds a secret: on a Dependabot pull request the updated module runs
+# here.
+name: "tnmn.io: go"
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Reads .github/go.yml from the base commit:
+  #
+  #   # The systems the tests run on, linux and macos (both by default).
+  #   systems: [linux, macos]
+  #   # Docker Compose services started before the tests, on Linux only (the
+  #   # macOS runners have no Docker), with the environment that points the
+  #   # tests at them.
+  #   services: [test-postgres]
+  #   env:
+  #     MY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/test?sslmode=disable
+  setup:
+    name: "tnmn.io: go (setup)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      module: ${{ steps.tree.outputs.module }}
+      goreleaser: ${{ steps.tree.outputs.goreleaser }}
+      matrix: ${{ steps.config.outputs.matrix }}
+      services: ${{ steps.config.outputs.services }}
+      env: ${{ steps.config.outputs.env }}
+    steps:
+      # Only the files that decide which jobs run, at the commit checked.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            go.mod
+            .goreleaser.yaml
+            .goreleaser.yml
+          sparse-checkout-cone-mode: false
+      - id: tree
+        name: Module and release build
+        run: |
+          if [ -f go.mod ]; then
+            echo "module=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No go.mod: nothing to check."
+            echo "module=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f .goreleaser.yaml ] || [ -f .goreleaser.yml ]; then
+            echo "goreleaser=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "goreleaser=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only the configuration, at the base commit; on a push, at the pushed
+      # commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/go.yml
+          sparse-checkout-cone-mode: false
+      # Every value is checked here, so the jobs below can use them as they
+      # are: a system name, a Compose service name, an environment variable's
+      # name and a one-line value.
+      - id: config
+        name: Configuration from the base
+        run: |
+          config=.base-config/.github/go.yml
+          if [ -f "$config" ]; then
+            json="$(yq -o=json -I=0 '. // {}' "$config")"
+          else
+            json='{}'
+          fi
+          rm -rf .base-config
+          matrix="$(jq -c '
+            (.systems // ["linux", "macos"]) as $systems
+            | if ($systems | type) != "array" or ($systems | length) == 0
+                 or any($systems[]; . != "linux" and . != "macos")
+              then error("systems: a list of linux and macos") else . end
+            | [$systems | unique[] | {os: ., runner: {linux: "ubuntu-latest", macos: "macos-latest"}[.]}]
+          ' <<< "$json")"
+          services="$(jq -c '
+            (.services // [])
+            | if type != "array" or any(.[]; type != "string" or (test("^[A-Za-z0-9][A-Za-z0-9_.-]*$") | not))
+              then error("services: a list of Compose service names") else . end
+          ' <<< "$json")"
+          env="$(jq -c '
+            (.env // {})
+            | if type != "object"
+                 or any(to_entries[]; (.key | test("^[A-Za-z_][A-Za-z0-9_]*$") | not)
+                                      or (.value | type) != "string" or (.value | test("[\r\n]")))
+              then error("env: a map of variable names to one-line strings") else . end
+          ' <<< "$json")"
+          {
+            echo "matrix=$matrix"
+            echo "services=$services"
+            echo "env=$env"
+          } >> "$GITHUB_OUTPUT"
+
+  # Linux alone checks the coverage floor (the action runs in Docker, which
+  # only Linux runners have), starts the test services, and uploads lint's
+  # findings, so code scanning gets them once.
+  go:
+    name: "tnmn.io: go (${{ matrix.os }})"
+    needs: setup
+    if: needs.setup.outputs.module == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write # uploads golangci-lint's findings to code scanning
+    strategy:
+      # One system's failure does not cancel the other's run.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      # On a pull request, its head commit, not the test merge commit:
+      # golangci-lint's findings are filed under it (see the upload below).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .golangci.yml
+            .golangci.yaml
+            .testcoverage.yml
+          sparse-checkout-cone-mode: false
+      # The base's files replace the pull request's at the same paths, so the
+      # paths inside them resolve as they do locally. golangci-lint always
+      # gets its configuration explicitly, or none, so it never finds one the
+      # pull request adds.
+      - id: base
+        name: Configuration from the base
+        shell: bash
+        run: |
+          rm -f .golangci.yml .golangci.yaml .golangci.toml .golangci.json .testcoverage.yml
+          lint="--no-config"
+          for f in .golangci.yml .golangci.yaml; do
+            if [ -f ".base-config/$f" ]; then
+              cp ".base-config/$f" "$f"
+              lint="--config=$f"
+              break
+            fi
+          done
+          coverage=false
+          if [ -f .base-config/.testcoverage.yml ]; then
+            cp .base-config/.testcoverage.yml .testcoverage.yml
+            coverage=true
+          fi
+          rm -rf .base-config
+          echo "lint=$lint" >> "$GITHUB_OUTPUT"
+          echo "coverage=$coverage" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # go mod tidy changes nothing.
+      - name: go mod tidy
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted="$(git ls-files -z -- '*.go' ':!:vendor/' | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-formatted:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      # The findings also go to a SARIF file, which code scanning shows in the
+      # Security tab and on the pull request's lines.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+          args: ${{ steps.base.outputs.lint }} --output.text.path=stdout --output.sarif.path=golangci-lint.sarif
+      # After a failed lint too, so its findings show; not when lint never ran.
+      # On a pull request, filed under its head commit: GitHub makes a new
+      # merge commit when it rechecks the pull request (a ruleset change or a
+      # merge attempt), and code scanning would then wait for results on the
+      # new one. A private repository without GitHub Code Security has no code
+      # scanning: there the findings only show in the log.
+      - if: ${{ !cancelled() && matrix.os == 'linux' && hashFiles('golangci-lint.sarif') != '' && !github.event.repository.private }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: golangci-lint.sarif
+          category: golangci-lint
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+          sha: ${{ github.event.pull_request.head.sha || '' }}
+      - name: Test services
+        if: ${{ !cancelled() && matrix.os == 'linux' }}
+        env:
+          SERVICES: ${{ needs.setup.outputs.services }}
+          TEST_ENV: ${{ needs.setup.outputs.env }}
+        run: |
+          mapfile -t services < <(jq -r '.[]' <<< "$SERVICES")
+          if [ "${#services[@]}" -gt 0 ]; then
+            docker compose up --wait --wait-timeout 60 "${services[@]}"
+          fi
+          jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$TEST_ENV" >> "$GITHUB_ENV"
+      - name: go test
+        if: ${{ !cancelled() }}
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+      - name: coverage floor
+        if: matrix.os == 'linux' && steps.base.outputs.coverage == 'true'
+        uses: vladopajic/go-test-coverage@f94bcf0d6b9fa5fb8b783830b22648f6c17475e2 # v2.19.0
+        with:
+          config: ./.testcoverage.yml
+      # The module's own govulncheck when go.mod declares it as a tool, so the
+      # version it pins is the one that runs; this one otherwise.
+      - name: govulncheck
+        shell: bash
+        run: |
+          if go tool -n govulncheck > /dev/null 2>&1; then
+            go tool govulncheck ./...
+          else
+            go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+          fi
+
+  # The release build from .goreleaser.yaml, as a snapshot: every platform's
+  # binary, archives and checksums.txt in dist/, published nowhere. A change
+  # that breaks the release build fails here, not when the release runs.
+  snapshot:
+    name: "tnmn.io: go (snapshot)"
+    needs: setup
+    if: needs.setup.outputs.module == 'true' && needs.setup.outputs.goreleaser == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0 # the snapshot's version is the latest v* tag
+          persist-credentials: false
+      # No module cache, as in the release: GoReleaser's build reads nothing
+      # another workflow could have written.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.2
+          args: check
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.2
+          args: release --snapshot --clean

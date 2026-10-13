@@ -14,7 +14,7 @@ The organization's rulesets run these workflows on the pull requests of the repo
 | `.github/workflows/dependency-review.yml` | `tnmn.io: dependency-review` | the dependencies a pull request adds: a license off the organization's allowlist, or a known vulnerability, fails it. Public repositories and private ones with `tier: private-licensed` only |
 | `.github/workflows/go.yml` | `tnmn.io: go` | a Go module's checks on Linux and macOS: tidy `go.mod`, gofmt, vet, golangci-lint, tests with the race detector, the coverage floor and govulncheck; then a snapshot of the GoReleaser build. Go repositories only |
 
-A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters. GitHub does not allow CodeQL's `init` and `analyze` actions in a workflow a ruleset requires, so CodeQL stays in each repository's own workflows.
+A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters. GitHub does not allow CodeQL's `init` and `analyze` actions in a workflow a ruleset requires, so each repository calls CodeQL's workflow from its own workflows (see [CodeQL](#codeql)).
 
 Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's exceptions in `.github/dependency-review.yml`, and for Go `.github/go.yml`, `.golangci.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
@@ -41,6 +41,31 @@ jobs:
 ```
 
 A private repository without GitHub Code Security has no code scanning: there the findings only show in the job's log, the check never fails on them, and the repository needs no file.
+
+## CodeQL
+
+`.github/workflows/codeql.yml` runs CodeQL's advanced setup with the `security-extended` suite. It analyzes the Go module, test files included, when the repository has `go.mod`, and the workflows always. No ruleset can require it, so a repository calls it from its own workflow, on every pull request, on each push to `main` and daily:
+
+```yaml
+# .github/workflows/security.yml
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 5 * * *"
+
+permissions: {}
+
+jobs:
+  codeql:
+    permissions:
+      contents: read
+      security-events: write
+    uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # main
+```
+
+Its checks are `codeql / codeql (go)` and `codeql / codeql (actions)`, for a caller job named `codeql`, and the repository's ruleset requires them. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
 
 ## Go
 

@@ -1,0 +1,17 @@
+# zizmor's analysis of this repository's main, through its own zizmor.yml,
+# under the category "zizmor": code scanning compares each pull request's zizmor
+# alerts with it. A pull request runs zizmor.yml directly.
+name: security (main)
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write # uploads the results to code scanning
+    uses: ./.github/workflows/zizmor.yml

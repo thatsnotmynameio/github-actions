@@ -47,8 +47,19 @@ jobs:
             if [ -f "$f" ]; then cp "$f" "$config"; break; fi
           done
           rm -rf .base-config
+      # A repository without workflows has nothing to lint: the check passes.
+      - id: workflows
+        name: Workflows to lint
+        run: |
+          if compgen -G '.github/workflows/*.yml' > /dev/null || compgen -G '.github/workflows/*.yaml' > /dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No workflow in .github/workflows: nothing to lint."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
       # The official release binary, checked against its published sha256.
       - name: Install actionlint
+        if: steps.workflows.outputs.found == 'true'
         env:
           VERSION: 1.7.12
           SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -58,4 +69,5 @@ jobs:
           echo "${SHA256}  $archive" | sha256sum -c -
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
       - name: actionlint
+        if: steps.workflows.outputs.found == 'true'
         run: '"$RUNNER_TEMP/actionlint" -color -config-file "$RUNNER_TEMP/actionlint.yaml"'

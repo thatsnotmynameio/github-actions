@@ -17,7 +17,7 @@ The organization's rulesets run these workflows on the pull requests of the repo
 
 A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters.
 
-Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's exceptions in `.github/dependency-review.yml`, and for Go `.github/go.yml`, `.golangci.yml`, `.testcoverage.yml` and `.github/codeql/codeql-config.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
+Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's exceptions in `.github/dependency-review.yml`, and for Go `.github/go.yml`, `.golangci.yml` and `.github/codeql/codeql-config.yml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
 zizmor honors no `# zizmor: ignore` comment and no `ignore` list in its configuration, which a pull request could use to hide its own finding: a rule turned off with `disable: true` in the configuration on `main` is the only way to silence zizmor in a repository. An exception to a single finding is a dismissal of its code scanning alert, which an organization owner or security manager approves.
 
@@ -48,13 +48,15 @@ A private repository without GitHub Code Security has no code scanning: there th
 A Go repository's pull requests get `tnmn.io: go` and `tnmn.io: codeql (go)`. What the pull request builds and tests is its own (`go.mod`, the code, `.goreleaser.yaml`, the Compose file of the test services); the settings that could turn a check off come from the base commit:
 
 - `.golangci.yml` (or `.yaml`): golangci-lint's configuration. Without one, golangci-lint runs with its defaults.
-- `.testcoverage.yml`: the coverage floor, checked on Linux with [go-test-coverage](https://github.com/vladopajic/go-test-coverage) against `coverage.out`. Without one, there is no floor.
 - `.github/codeql/codeql-config.yml`: CodeQL's configuration. Without one, the `security-extended` suite runs.
-- `.github/go.yml`: the systems the tests run on, and the services they need:
+- `.github/go.yml`: the systems the tests run on, the coverage floor, and the services the tests need:
 
 ```yaml
 # The systems the tests run on, linux and macos (both by default).
 systems: [linux, macos]
+# The coverage floor: the least total coverage, in percent, of the statements
+# go test covers on Linux (go tool cover -func's total). None by default.
+coverage: 90
 # Docker Compose services started before the tests, on Linux only (the macOS
 # runners have no Docker), with the environment that points the tests at them.
 services: [test-postgres]

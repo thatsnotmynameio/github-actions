@@ -10,7 +10,7 @@
 # merge_group.
 # The settings that could turn a check off come from the base commit, never
 # from the pull request: .github/go.yml, golangci-lint's .golangci.yml (or
-# .yaml) and the coverage floor's .testcoverage.yml. A change to them applies
+# .yaml). A change to them applies
 # once it merges. What the pull request builds and tests is its own: go.mod,
 # the code, .goreleaser.yaml and the Compose file of the test services.
 # A repository without go.mod has nothing to check: only the setup job runs.
@@ -31,6 +31,9 @@ jobs:
   #
   #   # The systems the tests run on, linux and macos (both by default).
   #   systems: [linux, macos]
+  #   # The coverage floor: the least total coverage, in percent, of the
+  #   # statements go test covers on Linux (none by default).
+  #   coverage: 90
   #   # Docker Compose services started before the tests, on Linux only (the
   #   # macOS runners have no Docker), with the environment that points the
   #   # tests at them.
@@ -45,6 +48,7 @@ jobs:
       module: ${{ steps.tree.outputs.module }}
       goreleaser: ${{ steps.tree.outputs.goreleaser }}
       matrix: ${{ steps.config.outputs.matrix }}
+      coverage: ${{ steps.config.outputs.coverage }}
       services: ${{ steps.config.outputs.services }}
       env: ${{ steps.config.outputs.env }}
     steps:
@@ -102,6 +106,10 @@ jobs:
               then error("systems: a list of linux and macos") else . end
             | [$systems | unique[] | {os: ., runner: {linux: "ubuntu-latest", macos: "macos-latest"}[.]}]
           ' <<< "$json")"
+          coverage="$(jq -r '
+            (.coverage // "")
+            | if . == "" or (type == "number" and . >= 0 and . <= 100) then . else error("coverage: a percentage, from 0 to 100") end
+          ' <<< "$json")"
           services="$(jq -c '
             (.services // [])
             | if type != "array" or any(.[]; type != "string" or (test("^[A-Za-z0-9][A-Za-z0-9_.-]*$") | not))
@@ -118,13 +126,13 @@ jobs:
           # looks like it holds a secret, such as a URL's password.
           {
             echo "matrix=$matrix"
+            echo "coverage=$coverage"
             echo "services=$services"
             echo "env=$(base64 -w0 <<< "$env")"
           } >> "$GITHUB_OUTPUT"
 
-  # Linux alone checks the coverage floor (the action runs in Docker, which
-  # only Linux runners have), starts the test services, and uploads lint's
-  # findings, so code scanning gets them once.
+  # Linux alone starts the test services, so it alone checks the coverage
+  # floor, and it uploads lint's findings, so code scanning gets them once.
   go:
     name: "tnmn.io: go (${{ matrix.os }})"
     needs: setup
@@ -154,7 +162,6 @@ jobs:
           sparse-checkout: |
             .golangci.yml
             .golangci.yaml
-            .testcoverage.yml
           sparse-checkout-cone-mode: false
       # The base's files replace the pull request's at the same paths, so the
       # paths inside them resolve as they do locally. golangci-lint always
@@ -164,7 +171,7 @@ jobs:
         name: Configuration from the base
         shell: bash
         run: |
-          rm -f .golangci.yml .golangci.yaml .golangci.toml .golangci.json .testcoverage.yml
+          rm -f .golangci.yml .golangci.yaml .golangci.toml .golangci.json
           lint="--no-config"
           for f in .golangci.yml .golangci.yaml; do
             if [ -f ".base-config/$f" ]; then
@@ -173,14 +180,8 @@ jobs:
               break
             fi
           done
-          coverage=false
-          if [ -f .base-config/.testcoverage.yml ]; then
-            cp .base-config/.testcoverage.yml .testcoverage.yml
-            coverage=true
-          fi
           rm -rf .base-config
           echo "lint=$lint" >> "$GITHUB_OUTPUT"
-          echo "coverage=$coverage" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -234,11 +235,19 @@ jobs:
       - name: go test
         if: ${{ !cancelled() }}
         run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+      # The total of every package's statements, as go tool cover counts it.
       - name: coverage floor
-        if: matrix.os == 'linux' && steps.base.outputs.coverage == 'true'
-        uses: vladopajic/go-test-coverage@f94bcf0d6b9fa5fb8b783830b22648f6c17475e2 # v2.19.0
-        with:
-          config: ./.testcoverage.yml
+        if: matrix.os == 'linux' && needs.setup.outputs.coverage != ''
+        env:
+          FLOOR: ${{ needs.setup.outputs.coverage }}
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '$1 == "total:" { sub(/%$/, "", $NF); print $NF }')"
+          if awk -v total="$total" -v floor="$FLOOR" 'BEGIN { exit !(total + 0 >= floor + 0) }'; then
+            echo "Total coverage: ${total}%, at or above the floor of ${FLOOR}%."
+          else
+            echo "::error::Total coverage ${total}% is below the floor of ${FLOOR}%."
+            exit 1
+          fi
       # The module's own govulncheck when go.mod declares it as a tool, so the
       # version it pins is the one that runs; this one otherwise.
       - name: govulncheck

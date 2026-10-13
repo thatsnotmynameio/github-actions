@@ -14,7 +14,7 @@
 # that add one. A private repository without GitHub Code Security has no code
 # scanning: there the findings only show in the job's log, and the job never
 # fails on them.
-name: tnmn.io
+name: "tnmn.io: zizmor"
 
 on:
   pull_request:

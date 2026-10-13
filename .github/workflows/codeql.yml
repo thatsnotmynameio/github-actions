@@ -1,6 +1,7 @@
 # CodeQL's advanced setup, with the security-extended suite, published to
 # code scanning: the Go module, test files included, when the repository has
-# go.mod, and the GitHub Actions workflows. A repository calls it with
+# go.mod, the Python project when it has pyproject.toml, and the GitHub
+# Actions workflows. A repository calls it with
 # workflow_call from its own workflow, on every pull request, on each push to
 # main and daily: GitHub does not allow CodeQL's init and analyze actions in a
 # workflow a ruleset requires, so no organization ruleset can run it.
@@ -12,9 +13,10 @@
 #         security-events: write
 #       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # main
 #
-# Its checks are "<caller job> / codeql (go)" and "<caller job> / codeql
-# (actions)". Code scanning tells analyses apart by the caller's workflow and
-# job, the category (/language:go, /language:actions) and the matrix values
+# Its checks are "<caller job> / codeql (go)", "<caller job> / codeql
+# (python)" and "<caller job> / codeql (actions)". Code scanning tells
+# analyses apart by the caller's workflow and job, the category
+# (/language:go, /language:python, /language:actions) and the matrix values
 # (language, build-mode): a change to any of them leaves the old analysis's
 # alerts open on main.
 # The configuration (.github/codeql/codeql-config.yml) comes from the base
@@ -33,8 +35,9 @@ permissions:
   contents: read
 
 jobs:
-  # The languages to analyze: Go when the commit has go.mod, and always the
-  # workflows of the repository that calls this one.
+  # The languages to analyze: Go when the commit has go.mod, Python when it
+  # has pyproject.toml, and always the workflows of the repository that calls
+  # this one. Python needs no build: CodeQL reads its source as it is.
   setup:
     name: codeql (setup)
     runs-on: ubuntu-latest
@@ -48,13 +51,17 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             go.mod
+            pyproject.toml
           sparse-checkout-cone-mode: false
       - id: languages
         name: Languages
         run: |
           matrix='[{"language": "actions", "build-mode": "none"}]'
+          if [ -f pyproject.toml ]; then
+            matrix="$(jq -c '[{"language": "python", "build-mode": "none"}] + .' <<< "$matrix")"
+          fi
           if [ -f go.mod ]; then
-            matrix='[{"language": "go", "build-mode": "manual"}, {"language": "actions", "build-mode": "none"}]'
+            matrix="$(jq -c '[{"language": "go", "build-mode": "manual"}] + .' <<< "$matrix")"
           fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 

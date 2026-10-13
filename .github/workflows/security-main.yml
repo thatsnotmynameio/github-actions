@@ -1,6 +1,6 @@
-# zizmor's analysis of this repository's main, through its own zizmor.yml,
+# zizmor's analysis of this repository's main, through its zizmor.yml,
 # under the category "zizmor": code scanning compares each pull request's zizmor
-# alerts with it. A pull request runs zizmor.yml directly.
+# alerts with it. On a pull request the organization's ruleset runs zizmor.yml.
 name: security (main)
 
 on:
@@ -14,4 +14,7 @@ jobs:
     permissions:
       contents: read
       security-events: write # uploads the results to code scanning
-    uses: ./.github/workflows/zizmor.yml
+    # The full reference, pinned: zizmor asks for the self-repository syntax
+    # ($/), which actionlint 1.7.12 rejects, and flags ./ as unpinned. Bump it
+    # with the organization's rulesets.
+    uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@772b59a78d5344ba6e6869f9a4fc02f671a87312 # main

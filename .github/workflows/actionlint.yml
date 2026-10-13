@@ -1,0 +1,61 @@
+# actionlint over a repository's workflows, with the runner's shellcheck on
+# every run: script. An organization ruleset requires it on every pull request
+# of the repositories it targets, so a repository needs no file of its own, and
+# a pull request cannot change or skip it. It also runs on its own repository's
+# pull requests, and a caller can run it with workflow_call.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# The configuration (.github/actionlint.yaml) comes from the base branch, never
+# from the pull request: a pull request cannot turn a rule off for itself.
+name: tnmn.io
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: "tnmn.io: actionlint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only the configuration files, at the base commit; on a push, at the
+      # pushed commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actionlint.yaml
+            .github/actionlint.yml
+          sparse-checkout-cone-mode: false
+      # Always passed explicitly, empty when the base has none, so actionlint
+      # never finds the pull request's own file.
+      - name: Configuration from the base
+        run: |
+          config="$RUNNER_TEMP/actionlint.yaml"
+          : > "$config"
+          for f in .base-config/.github/actionlint.yaml .base-config/.github/actionlint.yml; do
+            if [ -f "$f" ]; then cp "$f" "$config"; break; fi
+          done
+          rm -rf .base-config
+      # The official release binary, checked against its published sha256.
+      - name: Install actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSLo "$archive" "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+      - name: actionlint
+        run: '"$RUNNER_TEMP/actionlint" -color -config-file "$RUNNER_TEMP/actionlint.yaml"'

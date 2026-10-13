@@ -1,0 +1,275 @@
+# A Python project's checks, on each system it runs on: a current uv.lock,
+# ruff's formatting and lint, the tests with coverage, and the coverage floor;
+# then the build of its packages and, when it has a Dockerfile, its image. An
+# organization ruleset requires it on every pull request of the Python
+# repositories it targets, so a repository needs no file of its own, and a
+# pull request cannot change or skip it. A repository also calls it with
+# workflow_call on each push to main, which gives code scanning the analysis
+# of main that a pull request's ruff alerts are compared against.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# The settings that could turn a check off come from the base commit, never
+# from the pull request: .github/python.yml, ruff's ruff.toml (or .ruff.toml).
+# ruff never reads [tool.ruff] in pyproject.toml here, so a project keeps its
+# ruff configuration in ruff.toml. A change to them applies once it merges.
+# What the pull request builds and tests is its own: pyproject.toml, uv.lock,
+# the code and the Dockerfile.
+# A repository without pyproject.toml has nothing to check: only the setup job
+# runs. Known vulnerabilities in the dependencies are grype's ("tnmn.io:
+# grype"), which reads uv.lock.
+# No job holds a secret: on a Dependabot pull request the updated project runs
+# here.
+name: "tnmn.io: python"
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: 0.12.23
+  RUFF_VERSION: 0.16.10
+  COVERAGE_VERSION: 7.16.2
+
+jobs:
+  # Reads .github/python.yml from the base commit:
+  #
+  #   # The systems the tests run on, linux and macos (both by default).
+  #   systems: [linux, macos]
+  #   # The coverage floor: the least total coverage, in percent, of the
+  #   # statements the tests cover on Linux (none by default).
+  #   coverage: 90
+  setup:
+    name: "tnmn.io: python (setup)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      project: ${{ steps.tree.outputs.project }}
+      package: ${{ steps.tree.outputs.package }}
+      image: ${{ steps.tree.outputs.image }}
+      matrix: ${{ steps.config.outputs.matrix }}
+      coverage: ${{ steps.config.outputs.coverage }}
+    steps:
+      # Only the files that decide which jobs run, at the commit checked.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            pyproject.toml
+            uv.lock
+            Dockerfile
+          sparse-checkout-cone-mode: false
+      # A project is checked against its uv.lock, so one without it fails
+      # here. A package is a project with a [build-system].
+      - id: tree
+        name: Project, package and image
+        run: |
+          if [ -f pyproject.toml ]; then
+            if [ ! -f uv.lock ]; then
+              echo "::error::pyproject.toml without uv.lock: run uv lock and commit it."
+              exit 1
+            fi
+            echo "project=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No pyproject.toml: nothing to check."
+            echo "project=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f pyproject.toml ] && python3 -c 'import sys, tomllib; sys.exit("build-system" not in tomllib.load(open("pyproject.toml", "rb")))'; then
+            echo "package=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "package=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f Dockerfile ]; then
+            echo "image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only the configuration, at the base commit; on a push, at the pushed
+      # commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/python.yml
+          sparse-checkout-cone-mode: false
+      # Every value is checked here, so the jobs below can use them as they
+      # are: a system name and a percentage.
+      - id: config
+        name: Configuration from the base
+        run: |
+          config=.base-config/.github/python.yml
+          if [ -f "$config" ]; then
+            json="$(yq -o=json -I=0 '. // {}' "$config")"
+          else
+            json='{}'
+          fi
+          rm -rf .base-config
+          matrix="$(jq -c '
+            (.systems // ["linux", "macos"]) as $systems
+            | if ($systems | type) != "array" or ($systems | length) == 0
+                 or any($systems[]; . != "linux" and . != "macos")
+              then error("systems: a list of linux and macos") else . end
+            | [$systems | unique[] | {os: ., runner: {linux: "ubuntu-latest", macos: "macos-latest"}[.]}]
+          ' <<< "$json")"
+          coverage="$(jq -r '
+            (.coverage // "")
+            | if . == "" or (type == "number" and . >= 0 and . <= 100) then . else error("coverage: a percentage, from 0 to 100") end
+          ' <<< "$json")"
+          {
+            echo "matrix=$matrix"
+            echo "coverage=$coverage"
+          } >> "$GITHUB_OUTPUT"
+
+  # Linux alone checks the coverage floor, and it uploads lint's findings, so
+  # code scanning gets them once.
+  python:
+    name: "tnmn.io: python (${{ matrix.os }})"
+    needs: setup
+    if: needs.setup.outputs.project == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write # uploads ruff's findings to code scanning
+    strategy:
+      # One system's failure does not cancel the other's run.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      # On a pull request, its head commit, not the test merge commit: ruff's
+      # findings are filed under it (see the upload below).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            ruff.toml
+            .ruff.toml
+          sparse-checkout-cone-mode: false
+      # The base's file replaces the pull request's at the same path, so the
+      # paths inside it resolve as they do locally. ruff always gets its
+      # configuration explicitly, or none (--isolated), so it never reads one
+      # the pull request adds or changes, pyproject.toml's included.
+      - id: base
+        name: Configuration from the base
+        shell: bash
+        run: |
+          rm -f ruff.toml .ruff.toml
+          ruff="--isolated"
+          for f in ruff.toml .ruff.toml; do
+            if [ -f ".base-config/$f" ]; then
+              cp ".base-config/$f" "$f"
+              ruff="--config=$f"
+              break
+            fi
+          done
+          rm -rf .base-config
+          echo "ruff=$ruff" >> "$GITHUB_OUTPUT"
+      # The Python of .python-version, or of pyproject.toml's requires-python.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # uv.lock matches pyproject.toml.
+      - name: uv lock
+        run: uv lock --check
+      - name: uv sync
+        run: uv sync --locked
+      - name: ruff format
+        env:
+          RUFF: ${{ steps.base.outputs.ruff }}
+        run: uvx "ruff@${RUFF_VERSION}" format --check "$RUFF"
+      # The findings also go to a SARIF file, which code scanning shows in the
+      # Security tab and on the pull request's lines.
+      - name: ruff check
+        if: ${{ !cancelled() }}
+        env:
+          RUFF: ${{ steps.base.outputs.ruff }}
+        shell: bash
+        run: |
+          status=0
+          uvx "ruff@${RUFF_VERSION}" check --output-format=github "$RUFF" || status=$?
+          uvx "ruff@${RUFF_VERSION}" check --exit-zero --output-format=sarif --output-file=ruff.sarif "$RUFF"
+          exit "$status"
+      # After a failed lint too, so its findings show; not when lint never ran.
+      # On a pull request, filed under its head commit: GitHub makes a new
+      # merge commit when it rechecks the pull request (a ruleset change or a
+      # merge attempt), and code scanning would then wait for results on the
+      # new one. A private repository without GitHub Code Security has no code
+      # scanning: there the findings only show in the log.
+      - if: ${{ !cancelled() && matrix.os == 'linux' && hashFiles('ruff.sarif') != '' && !github.event.repository.private }}
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ruff.sarif
+          category: ruff
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+          sha: ${{ github.event.pull_request.head.sha || '' }}
+      # The project's own pytest, from its locked dependencies, under coverage
+      # at this workflow's version. A project without test files has none to
+      # run, and passes. Coverage measures src/ in a src layout, the whole
+      # tree otherwise.
+      - id: test
+        name: pytest
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -z "$(git ls-files -- 'test_*.py' '*/test_*.py' '*_test.py')" ]; then
+            echo "::notice::No test file: nothing to test."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! uv run --locked python -c 'import pytest' 2> /dev/null; then
+            echo "::error::Test files but no pytest: add it with uv add --dev pytest."
+            exit 1
+          fi
+          source=.
+          if [ -d src ]; then source=src; fi
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+          uv run --locked --with "coverage==${COVERAGE_VERSION}" coverage run --branch --source="$source" -m pytest
+      # The total of the measured statements and branches, as coverage report
+      # counts it.
+      - name: coverage floor
+        if: matrix.os == 'linux' && needs.setup.outputs.coverage != '' && steps.test.outputs.ran == 'true'
+        env:
+          FLOOR: ${{ needs.setup.outputs.coverage }}
+        run: uv run --locked --with "coverage==${COVERAGE_VERSION}" coverage report --fail-under="$FLOOR"
+
+  # The release build: the project's sdist and wheel when it is a package,
+  # and its image when it has a Dockerfile, published nowhere. A change that
+  # breaks either fails here, not when it is released.
+  build:
+    name: "tnmn.io: python (build)"
+    needs: setup
+    if: needs.setup.outputs.project == 'true' && (needs.setup.outputs.package == 'true' || needs.setup.outputs.image == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # No cache, as in a release: the build reads nothing another workflow
+      # could have written.
+      - if: needs.setup.outputs.package == 'true'
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: uv build
+        if: needs.setup.outputs.package == 'true'
+        run: uv build
+      - name: docker build
+        if: needs.setup.outputs.image == 'true'
+        run: docker build .

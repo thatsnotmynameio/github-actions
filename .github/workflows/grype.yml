@@ -1,0 +1,90 @@
+# Grype: vulnerable dependencies and malicious packages in every manifest of a
+# repository, through Anchore's scan action. An organization ruleset requires
+# it on every pull request of the repositories it targets, so a repository
+# needs no file of its own, and a pull request cannot change or skip it. A
+# public repository also calls it with workflow_call on each push to main, so
+# code scanning has the analysis of main that a pull request's alerts are
+# compared against.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# The configuration (.grype.yaml), where a repository ignores a vulnerability
+# in a package with the reason, comes from the base branch, never from the
+# pull request: a pull request cannot ignore its own finding. Grype has no
+# inline ignore. Never ignore by fix state, through exclude or only-fixed:
+# each would also drop the matches on malware advisories, which have no fixed
+# version.
+# On a public repository the findings go to code scanning under the category
+# "grype", and the code scanning rule of a ruleset blocks the pull requests
+# that add one. A private repository without GitHub Code Security has no code
+# scanning: there the findings only show in the job's log. The job never fails
+# on a finding, only on a tool error.
+name: "tnmn.io: grype"
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  grype:
+    name: "tnmn.io: grype"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # uploads the results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Only the configuration files, at the base commit; on a push, at the
+      # pushed commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .grype.yaml
+            .grype.yml
+            .grype/config.yaml
+          sparse-checkout-cone-mode: false
+      # Always passed explicitly, with no ignore rule when the base has none:
+      # an explicit configuration turns off grype's own search, so it never
+      # finds the pull request's file.
+      - name: Configuration from the base
+        run: |
+          config="$RUNNER_TEMP/grype.yaml"
+          echo 'ignore: []' > "$config"
+          for f in .base-config/.grype.yaml .base-config/.grype.yml .base-config/.grype/config.yaml; do
+            if [ -f "$f" ]; then cp "$f" "$config"; break; fi
+          done
+          rm -rf .base-config
+      # fail-build false: grype exits non-zero only on an error. A database
+      # grype cannot check for updates, or older than its maximum age, is an
+      # error.
+      - id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        env:
+          GRYPE_DB_REQUIRE_UPDATE_CHECK: "true"
+          GRYPE_DB_VALIDATE_AGE: "true"
+          GRYPE_CHECK_FOR_APP_UPDATE: "false"
+        with:
+          path: "."
+          config: ${{ runner.temp }}/grype.yaml
+          fail-build: false
+          output-format: sarif
+      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        if: ${{ !github.event.repository.private }}
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype
+      - name: Findings
+        if: ${{ github.event.repository.private }}
+        env:
+          SARIF: ${{ steps.scan.outputs.sarif }}
+        run: |
+          jq -r '.runs[].results[] | "\(.level)\t\(.ruleId)\t\(.message.text | split("\n")[0])"' "$SARIF" | tee -a "$GITHUB_STEP_SUMMARY"

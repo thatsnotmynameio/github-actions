@@ -13,11 +13,11 @@ The organization's rulesets run these workflows on the pull requests of the repo
 | `.github/workflows/grype.yml` | `tnmn.io: grype` | Grype: vulnerable dependencies and malicious packages in every manifest |
 | `.github/workflows/dependency-review.yml` | `tnmn.io: dependency-review` | the dependencies a pull request adds: a license off the organization's allowlist, except in the packages the workflow exempts, or a known vulnerability, fails it. A repository can exempt an advisory, not a package's license. Public repositories and private ones with `tier: private-licensed` only |
 | `.github/workflows/go.yml` | `tnmn.io: go` | a Go module's checks on Linux and macOS: tidy `go.mod`, gofmt, vet, golangci-lint, tests with the race detector, the coverage floor and govulncheck; then a snapshot of the GoReleaser build. Go repositories only |
-| `.github/workflows/python.yml` | `tnmn.io: python` | a Python project's checks on Linux and macOS: a current `uv.lock`, ruff's formatting and lint, the tests with coverage and the coverage floor; then the build of its packages and its image. Python repositories only |
+| `.github/workflows/python.yml` | `tnmn.io: python` | a Python project's checks on Linux and macOS: a current `uv.lock`, ruff's formatting and lint, mypy's type check, the tests with coverage and the coverage floor; then the build of its packages and its image. Python repositories only |
 
 A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters. GitHub does not allow CodeQL's `init` and `analyze` actions in a workflow a ruleset requires, so each repository calls CodeQL's workflow from its own workflows (see [CodeQL](#codeql)).
 
-Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's advisory exceptions (`allow-ghsas`) in `.github/dependency-review.yml`, for Go `.github/go.yml`, `.golangci.yml`, and for Python `.github/python.yml`, `ruff.toml`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
+Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's advisory exceptions (`allow-ghsas`) in `.github/dependency-review.yml`, for Go `.github/go.yml`, `.golangci.yml`, and for Python `.github/python.yml`, `ruff.toml`, `mypy.ini`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
 zizmor honors no `# zizmor: ignore` comment and no `ignore` list in its configuration, which a pull request could use to hide its own finding: a rule turned off with `disable: true` in the configuration on `main` is the only way to silence zizmor in a repository. An exception to a single finding is a dismissal of its code scanning alert, which an organization owner or security manager approves.
 
@@ -148,6 +148,7 @@ gh attestation verify <file> --repo <owner>/<repo> \
 A Python repository's pull requests get `tnmn.io: python`. What the pull request builds and tests is its own (`pyproject.toml`, `uv.lock`, the code, the `Dockerfile`); the settings that could turn a check off come from the base commit:
 
 - `ruff.toml` (or `.ruff.toml`): ruff's configuration. ruff never reads `[tool.ruff]` in `pyproject.toml` here, since the pull request owns that file: keep ruff's configuration in `ruff.toml`. Without one, ruff runs with its defaults.
+- `mypy.ini` (or `.mypy.ini`): mypy's configuration, which turns the type check on. mypy never reads `[tool.mypy]` in `pyproject.toml` here, for the same reason: keep mypy's configuration in `mypy.ini`. Without one, mypy does not run.
 - `.github/python.yml`: the systems the tests run on and the coverage floor:
 
 ```yaml
@@ -159,6 +160,8 @@ coverage: 90
 ```
 
 A project must commit its `uv.lock`: the check fails without it, and fails when it no longer matches `pyproject.toml`. The tests run with the project's own pytest, from its locked dependencies; a project without test files passes. Coverage measures `src/` in a src layout, the whole tree otherwise. The build job runs `uv build` when `pyproject.toml` has a `[build-system]`, and `docker build` when the repository has a `Dockerfile`. Known vulnerabilities in the dependencies are `tnmn.io: grype`'s, which reads `uv.lock`.
+
+mypy runs at the workflow's version over the project's locked environment, so it follows the imports and loads the plugins its configuration names (such as `pydantic.mypy`) from `uv.lock`. It checks the configuration's `files`, or `src/` in a src layout and the whole tree otherwise. Its findings are annotations on the pull request's lines; they do not go to code scanning.
 
 ruff's findings go to code scanning under the category `ruff`. Code scanning compares a pull request with the analysis of `main`, so a Python repository also runs the workflow on each push to `main`:
 

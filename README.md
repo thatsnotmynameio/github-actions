@@ -13,7 +13,7 @@ The organization's rulesets run these workflows on the pull requests of the repo
 | `.github/workflows/grype.yml` | `tnmn.io: grype` | Grype: vulnerable dependencies and malicious packages in every manifest |
 | `.github/workflows/dependency-review.yml` | `tnmn.io: dependency-review` | the dependencies a pull request adds: a license off the organization's allowlist, except in the packages the workflow exempts, or a known vulnerability, fails it. A repository can exempt an advisory, not a package's license. Public repositories and private ones with `tier: private-licensed` only |
 | `.github/workflows/go.yml` | `tnmn.io: go` | a Go module's checks on Linux and macOS: tidy `go.mod`, gofmt, vet, golangci-lint, tests with the race detector, the coverage floor and govulncheck; then a snapshot of the GoReleaser build. Go repositories only |
-| `.github/workflows/python.yml` | `tnmn.io: python` | a Python project's checks on Linux and macOS: a current `uv.lock`, ruff's formatting and lint, mypy's type check, the tests with coverage and the coverage floor; then the build of its packages and its image. Python repositories only |
+| `.github/workflows/python.yml` | `tnmn.io: python` | a Python project's checks on Linux: a current `uv.lock`, ruff's formatting and lint, mypy's type check, the tests with coverage and the coverage floor; then the build of its packages and its image. Python repositories only |
 
 A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters. GitHub does not allow CodeQL's `init` and `analyze` actions in a workflow a ruleset requires, so each repository calls CodeQL's workflow from its own workflows (see [CodeQL](#codeql)).
 
@@ -149,17 +149,23 @@ A Python repository's pull requests get `tnmn.io: python`. What the pull request
 
 - `ruff.toml` (or `.ruff.toml`): ruff's configuration. ruff never reads `[tool.ruff]` in `pyproject.toml` here, since the pull request owns that file: keep ruff's configuration in `ruff.toml`. Without one, ruff runs with its defaults.
 - `mypy.ini` (or `.mypy.ini`): mypy's configuration, which turns the type check on. mypy never reads `[tool.mypy]` in `pyproject.toml` here, for the same reason: keep mypy's configuration in `mypy.ini`. Without one, mypy does not run.
-- `.github/python.yml`: the systems the tests run on and the coverage floor:
+- `.github/python.yml`: the coverage floor and Trunk's test collections:
 
 ```yaml
-# The systems the tests run on, linux and macos (both by default).
-systems: [linux]
 # The coverage floor: the least total coverage, in percent, of the statements
-# and branches the tests cover on Linux (coverage report's total). None by default.
+# and branches the tests cover (coverage report's total). None by default.
 coverage: 90
+# Trunk Flaky Tests' test collections, by their 8-character IDs, each with the
+# pytest arguments that pick its tests (all of them without any). None by
+# default.
+trunk:
+  - collection: AbC12345
+    pytest: [tests/integration]
+  - collection: XyZ98765
+    pytest: [--ignore=tests/integration]
 ```
 
-A project must commit its `uv.lock`: the check fails without it, and fails when it no longer matches `pyproject.toml`. The tests run with the project's own pytest, from its locked dependencies; a project without test files passes. Coverage measures `src/` in a src layout, the whole tree otherwise. The build job runs `uv build` when `pyproject.toml` has a `[build-system]`, and `docker build` when the repository has a `Dockerfile`. Known vulnerabilities in the dependencies are `tnmn.io: grype`'s, which reads `uv.lock`.
+Everything runs on Linux. A project must commit its `uv.lock`: the check fails without it, and fails when it no longer matches `pyproject.toml`. The tests run with the project's own pytest, from its locked dependencies; a project without test files passes. Coverage measures `src/` in a src layout, the whole tree otherwise, and the coverage job checks the floor over every test job's data. The build job runs `uv build` when `pyproject.toml` has a `[build-system]`, and `docker build` when the repository has a `Dockerfile`. Known vulnerabilities in the dependencies are `tnmn.io: grype`'s, which reads `uv.lock`.
 
 mypy runs at the workflow's version over the project's locked environment, so it follows the imports and loads the plugins its configuration names (such as `pydantic.mypy`) from `uv.lock`. It checks the configuration's `files`, or `src/` in a src layout and the whole tree otherwise. Its findings are annotations on the pull request's lines; they do not go to code scanning.
 
@@ -179,4 +185,13 @@ jobs:
       contents: read
       security-events: write
     uses: thatsnotmynameio/github-actions/.github/workflows/python.yml@<sha> # main
+    # For Trunk Flaky Tests (below): main's results go to Trunk too.
+    secrets:
+      TRUNK_API_TOKEN: ${{ secrets.TRUNK_API_TOKEN }}
 ```
+
+### Trunk Flaky Tests
+
+With `trunk`, the tests run in a job of their own for each collection (`tnmn.io: python (test <collection>)`), pytest with that collection's arguments: the repository decides how its tests split, by directory, marker or anything pytest selects, and that no test lands in two collections or in none. A collection whose arguments select no test passes. Each job's JUnit report then goes to its collection through Trunk's uploader (`trunk-io/analytics-uploader`), in a job of its own (`tnmn.io: python (trunk <collection>)`): the only job that holds Trunk's token, and it runs none of the pull request's code. Without `trunk`, the tests run in one job (`tnmn.io: python (test)`) and nothing goes to Trunk.
+
+The collections are created in Trunk's app, which holds their monitors, quarantining and ticketing. The organization holds Trunk's token in the `TRUNK_API_TOKEN` secret and its slug in the `TRUNK_ORG_URL_SLUG` variable. Without them (on a Dependabot or a fork's pull request, for instance), nothing is sent, and a failed upload never fails the check.

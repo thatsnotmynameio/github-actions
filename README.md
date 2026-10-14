@@ -79,7 +79,8 @@ A Go repository's pull requests get `tnmn.io: go`. What the pull request builds 
 # The systems the tests run on, linux and macos (both by default).
 systems: [linux, macos]
 # The coverage floor: the least total coverage, in percent, of the statements
-# go test covers on Linux (go tool cover -func's total). None by default.
+# go test covers on Linux (go tool cover -func's total), generated files left
+# out. None by default.
 coverage: 90
 # Docker Compose services started before the tests, on Linux only (the macOS
 # runners have no Docker), with the environment that points the tests at them.
@@ -87,6 +88,8 @@ services: [test-postgres]
 env:
   MY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/test?sslmode=disable
 ```
+
+A generated file is one with Go's `// Code generated ... DO NOT EDIT.` line before the package clause, as golangci-lint and gopls recognize it, so code from `buf generate`, `stringer` or `mockgen` needs no setting of its own.
 
 govulncheck is the module's own when `go.mod` declares it as a tool, so the version it pins is the one that runs.
 

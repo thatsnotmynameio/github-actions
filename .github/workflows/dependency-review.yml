@@ -83,15 +83,19 @@ jobs:
           allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, LicenseRef-scancode-google-patent-license-golang
           # Packages whose license is not checked against the list, which
           # stays as it is. PostHog (PostHog/posthog's uv.lock) and Polar
-          # (polarsource/polar's server/uv.lock) ship both; PostHog/viaduck
+          # (polarsource/polar's server/uv.lock) ship all three; PostHog/viaduck
           # and microsoft/hve-core exempt typing-extensions the same way.
           # - greenlet, from sqlalchemy[asyncio]: MIT AND PSF-2.0.
           # - typing-extensions, from fastapi, pydantic and sqlalchemy:
           #   PSF-2.0 on PyPI. GitHub detects Python-2.0 AND GPL-1.0-or-later
           #   AND ..., the GPL from the historical CNRI/BeOpen chain of
           #   CPython's license.
+          # - pathspec, from mypy (1.16 and later), a development tool:
+          #   MPL-2.0, whose copyleft covers changes to its own files only.
+          #   fastapi/fastapi's uv.lock has it too.
           allow-dependencies-licenses: >-
             pkg:pypi/greenlet,
+            pkg:pypi/pathspec,
             pkg:pypi/typing-extensions
           # Every new vulnerability, whatever its severity and scope. Set here
           # so that the exceptions file cannot turn a check off or make it warn.

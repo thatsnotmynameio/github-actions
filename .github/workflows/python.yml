@@ -1,6 +1,7 @@
 # A Python project's checks, on each system it runs on: a current uv.lock,
-# ruff's formatting and lint, the tests with coverage, and the coverage floor;
-# then the build of its packages and, when it has a Dockerfile, its image. An
+# ruff's formatting and lint, mypy's type check when the project configures
+# it, the tests with coverage, and the coverage floor; then the build of its
+# packages and, when it has a Dockerfile, its image. An
 # organization ruleset requires it on every pull request of the Python
 # repositories it targets, so a repository needs no file of its own, and a
 # pull request cannot change or skip it. A repository also calls it with
@@ -9,9 +10,10 @@
 # A ruleset ignores the triggers' filters and runs it only on pull_request and
 # merge_group.
 # The settings that could turn a check off come from the base commit, never
-# from the pull request: .github/python.yml, ruff's ruff.toml (or .ruff.toml).
-# ruff never reads [tool.ruff] in pyproject.toml here, so a project keeps its
-# ruff configuration in ruff.toml. A change to them applies once it merges.
+# from the pull request: .github/python.yml, ruff's ruff.toml (or .ruff.toml),
+# mypy's mypy.ini (or .mypy.ini). Neither reads its section of pyproject.toml
+# ([tool.ruff], [tool.mypy]) here, so a project keeps their configuration in
+# those files. A change to them applies once it merges.
 # What the pull request builds and tests is its own: pyproject.toml, uv.lock,
 # the code and the Dockerfile.
 # A repository without pyproject.toml has nothing to check: only the setup job
@@ -32,6 +34,7 @@ permissions:
 env:
   UV_VERSION: 0.12.23
   RUFF_VERSION: 0.16.10
+  MYPY_VERSION: 2.4.0
   COVERAGE_VERSION: 7.16.2
 
 jobs:
@@ -157,16 +160,19 @@ jobs:
           sparse-checkout: |
             ruff.toml
             .ruff.toml
+            mypy.ini
+            .mypy.ini
           sparse-checkout-cone-mode: false
       # The base's file replaces the pull request's at the same path, so the
       # paths inside it resolve as they do locally. ruff always gets its
       # configuration explicitly, or none (--isolated), so it never reads one
-      # the pull request adds or changes, pyproject.toml's included.
+      # the pull request adds or changes, pyproject.toml's included. So does
+      # mypy, which runs only with one.
       - id: base
         name: Configuration from the base
         shell: bash
         run: |
-          rm -f ruff.toml .ruff.toml
+          rm -f ruff.toml .ruff.toml mypy.ini .mypy.ini
           ruff="--isolated"
           for f in ruff.toml .ruff.toml; do
             if [ -f ".base-config/$f" ]; then
@@ -175,8 +181,19 @@ jobs:
               break
             fi
           done
+          mypy=""
+          for f in mypy.ini .mypy.ini; do
+            if [ -f ".base-config/$f" ]; then
+              cp ".base-config/$f" "$f"
+              mypy="$f"
+              break
+            fi
+          done
           rm -rf .base-config
-          echo "ruff=$ruff" >> "$GITHUB_OUTPUT"
+          {
+            echo "ruff=$ruff"
+            echo "mypy=$mypy"
+          } >> "$GITHUB_OUTPUT"
       # The Python of .python-version, or of pyproject.toml's requires-python.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -216,6 +233,36 @@ jobs:
           category: ruff
           ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
           sha: ${{ github.event.pull_request.head.sha || '' }}
+      # The types, when the base has mypy's configuration: mypy at this
+      # workflow's version, over the project's locked environment, so it
+      # follows the imports and loads the plugins the configuration names.
+      # It checks the configuration's files, or src/ in a src layout and the
+      # whole tree otherwise. Each finding becomes an annotation on the pull
+      # request's lines.
+      - name: mypy
+        if: ${{ !cancelled() && steps.base.outputs.mypy != '' }}
+        env:
+          MYPY: ${{ steps.base.outputs.mypy }}
+        shell: bash
+        run: |
+          targets=()
+          if ! uv run --locked python -c 'import configparser, sys; c = configparser.RawConfigParser(); c.read(sys.argv[1]); sys.exit(not c.has_option("mypy", "files"))' "$MYPY"; then
+            if [ -d src ]; then targets=(src); else targets=(.); fi
+          fi
+          status=0
+          uv run --locked --with "mypy==${MYPY_VERSION}" mypy --config-file="$MYPY" --output=json "${targets[@]}" > "$RUNNER_TEMP/mypy.json" || status=$?
+          jq -Rr '
+            def data: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+            def property: data | gsub(":"; "%3A") | gsub(","; "%2C");
+            (fromjson? // null) as $f
+            | if ($f | type) == "object" then
+                "::\(if $f.severity == "error" then "error" else "notice" end)"
+                + " file=\($f.file | property),line=\($f.line),col=\($f.column + 1),title=\("mypy [\($f.code)]" | property)"
+                + "::\("\($f.file):\($f.line): \($f.message)\(if $f.hint then "\n\($f.hint)" else "" end)" | data)"
+              elif . != "" then .
+              else empty end
+          ' "$RUNNER_TEMP/mypy.json"
+          exit "$status"
       # The project's own pytest, from its locked dependencies, under coverage
       # at this workflow's version. A project without test files has none to
       # run, and passes. Coverage measures src/ in a src layout, the whole

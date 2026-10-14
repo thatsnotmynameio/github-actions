@@ -9,11 +9,12 @@
 # runs on public repositories and on private ones whose custom property tier
 # is private-licensed. Elsewhere, and on a merge group or a push, which have
 # no pull request to compare, the job passes with a notice.
-# The allowlist and the failure policy are the organization's: a repository
-# cannot change them. Its own exceptions, a package's license
-# (allow-dependencies-licenses) or an advisory (allow-ghsas), each with a
-# comment giving the reason, go in .github/dependency-review.yml, read from
-# the base branch, never from the pull request.
+# The allowlist, the packages exempt from it and the failure policy are the
+# organization's: a repository cannot change them. Its own exceptions, each
+# an advisory (allow-ghsas) with a comment giving the reason, go in
+# .github/dependency-review.yml, read from the base branch, never from the
+# pull request. A package's license is exempted here only: the
+# allow-dependencies-licenses input below overrides that key of the file.
 name: "tnmn.io: dependency-review"
 
 on:
@@ -68,7 +69,8 @@ jobs:
           rm -rf .base-config
           echo "file=$file" >> "$GITHUB_OUTPUT"
       # The inputs override the same keys of the exceptions file, so a
-      # repository can add exceptions but not change the policy.
+      # repository can exempt an advisory but not change the policy or exempt
+      # a package's license.
       - if: steps.applies.outputs.run == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
@@ -79,6 +81,18 @@ jobs:
           # is on the list: adding one, or any other license, is a decision
           # made here.
           allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, LicenseRef-scancode-google-patent-license-golang
+          # Packages whose license is not checked against the list, which
+          # stays as it is. PostHog (PostHog/posthog's uv.lock) and Polar
+          # (polarsource/polar's server/uv.lock) ship both; PostHog/viaduck
+          # and microsoft/hve-core exempt typing-extensions the same way.
+          # - greenlet, from sqlalchemy[asyncio]: MIT AND PSF-2.0.
+          # - typing-extensions, from fastapi, pydantic and sqlalchemy:
+          #   PSF-2.0 on PyPI. GitHub detects Python-2.0 AND GPL-1.0-or-later
+          #   AND ..., the GPL from the historical CNRI/BeOpen chain of
+          #   CPython's license.
+          allow-dependencies-licenses: >-
+            pkg:pypi/greenlet,
+            pkg:pypi/typing-extensions
           # Every new vulnerability, whatever its severity and scope. Set here
           # so that the exceptions file cannot turn a check off or make it warn.
           fail-on-severity: low

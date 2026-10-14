@@ -83,8 +83,12 @@ jobs:
           allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, LicenseRef-scancode-google-patent-license-golang
           # Packages whose license is not checked against the list, which
           # stays as it is. PostHog (PostHog/posthog's uv.lock) and Polar
-          # (polarsource/polar's server/uv.lock) ship all three; PostHog/viaduck
+          # (polarsource/polar's server/uv.lock) ship all five; PostHog/viaduck
           # and microsoft/hve-core exempt typing-extensions the same way.
+          # - aiohappyeyeballs, from aiohttp, which hatchet-sdk depends on:
+          #   PSF-2.0 on PyPI. GitHub detects GPL-1.0-or-later AND PSF-2.0 AND
+          #   Python-2.0 AND ..., the GPL from CPython's license, as for
+          #   typing-extensions.
           # - greenlet, from sqlalchemy[asyncio]: MIT AND PSF-2.0.
           # - typing-extensions, from fastapi, pydantic and sqlalchemy:
           #   PSF-2.0 on PyPI. GitHub detects Python-2.0 AND GPL-1.0-or-later
@@ -93,9 +97,16 @@ jobs:
           # - pathspec, from mypy (1.16 and later), a development tool:
           #   MPL-2.0, whose copyleft covers changes to its own files only.
           #   fastapi/fastapi's uv.lock has it too.
+          # - protobuf, from hatchet-sdk and grpcio: BSD-3-Clause on PyPI.
+          #   GitHub detects BSD-3-Clause AND LicenseRef-scancode-protobuf,
+          #   scancode's name for the paragraph protobuf's LICENSE adds to
+          #   BSD-3-Clause: code protoc generates is owned by the owner of its
+          #   input.
           allow-dependencies-licenses: >-
+            pkg:pypi/aiohappyeyeballs,
             pkg:pypi/greenlet,
             pkg:pypi/pathspec,
+            pkg:pypi/protobuf,
             pkg:pypi/typing-extensions
           # Every new vulnerability, whatever its severity and scope. Set here
           # so that the exceptions file cannot turn a check off or make it warn.

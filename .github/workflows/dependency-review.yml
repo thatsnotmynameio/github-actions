@@ -81,6 +81,9 @@ jobs:
           # Software Foundation's, is permissive too: it asks for the notice and
           # a summary of any changes. No copyleft license is on the list: adding
           # one, or any other license, is a decision made here.
+          # Development dependencies are checked too: with pnpm-lock.yaml,
+          # GitHub reports every package as runtime, even a devDependency, so
+          # a license only development needs is exempted by package below.
           allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, PSF-2.0, LicenseRef-scancode-google-patent-license-golang
           # Packages whose license is not checked against the list, which
           # stays as it is. PostHog (PostHog/posthog's uv.lock) and Polar
@@ -105,7 +108,27 @@ jobs:
           #   scancode's name for the paragraph protobuf's LICENSE adds to
           #   BSD-3-Clause: code protoc generates is owned by the owner of its
           #   input.
+          # - lightningcss and its 11 platform binaries, from vite 8, which
+          #   Vitest depends on: MPL-2.0, as pathspec. GitLab,
+          #   grafana/faro-web-sdk and microsoft/hve-core exempt it the same
+          #   way.
+          # - caniuse-lite, browser data from browserslist, which babel, under
+          #   Vitest's Istanbul coverage, depends on: CC-BY-4.0, a Creative
+          #   Commons license, meant for data, not code. GitLab approves it.
           allow-dependencies-licenses: >-
+            pkg:npm/caniuse-lite,
+            pkg:npm/lightningcss,
+            pkg:npm/lightningcss-android-arm64,
+            pkg:npm/lightningcss-darwin-arm64,
+            pkg:npm/lightningcss-darwin-x64,
+            pkg:npm/lightningcss-freebsd-x64,
+            pkg:npm/lightningcss-linux-arm-gnueabihf,
+            pkg:npm/lightningcss-linux-arm64-gnu,
+            pkg:npm/lightningcss-linux-arm64-musl,
+            pkg:npm/lightningcss-linux-x64-gnu,
+            pkg:npm/lightningcss-linux-x64-musl,
+            pkg:npm/lightningcss-win32-arm64-msvc,
+            pkg:npm/lightningcss-win32-x64-msvc,
             pkg:pypi/aiohappyeyeballs,
             pkg:pypi/certifi,
             pkg:pypi/greenlet,

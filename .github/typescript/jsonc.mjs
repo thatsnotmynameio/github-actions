@@ -1,5 +1,5 @@
-// Prints a JSONC file (JSON with comments and trailing commas, as oxlint,
-// oxfmt and knip read their configuration) as JSON, for jq.
+// Prints a JSONC file (JSON with comments and trailing commas, as oxlint reads
+// its configuration) as JSON, for jq.
 //
 //   node jsonc.mjs <file>
 import { readFileSync } from "node:fs";

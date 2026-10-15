@@ -365,7 +365,6 @@ jobs:
             oxlint.config.*
             oxfmt.config.*
             knip.*
-            knip.config.*
           sparse-checkout-cone-mode: false
       # This workflow's repository and commit: the caller's workflow_call, or
       # the ruleset, runs it from there.
@@ -430,7 +429,7 @@ jobs:
           tools="$RUNNER_TEMP/tnmn-typescript"
           base=.base-config
           status=0
-          for f in "$base"/oxlint.config.* "$base"/oxfmt.config.* "$base"/knip.* "$base"/knip.config.*; do
+          for f in "$base"/oxlint.config.* "$base"/oxfmt.config.* "$base"/knip.*; do
             [ -e "$f" ] || continue
             case "${f#"$base"/}" in
               knip.json | knip.jsonc) ;;
@@ -448,16 +447,16 @@ jobs:
           if [ -f "$base/.oxlintrc.json" ]; then
             cp "$base/.oxlintrc.json" .oxlintrc.json
             oxlint=.oxlintrc.json
-            rules="$(node "$tools/jsonc.mjs" .oxlintrc.json)"
-            if jq -e 'has("jsPlugins")' <<< "$rules" > /dev/null; then
+            config="$(node "$tools/jsonc.mjs" .oxlintrc.json)"
+            if jq -e 'has("jsPlugins")' <<< "$config" > /dev/null; then
               echo "::error::The base's .oxlintrc.json declares jsPlugins, whose code would come from the pull request's lockfile: oxlint runs its built-in rules only."
               status=1
             fi
-            if jq -e 'has("extends")' <<< "$rules" > /dev/null; then
+            if jq -e 'has("extends")' <<< "$config" > /dev/null; then
               echo "::error::The base's .oxlintrc.json extends other files, which would come from the pull request: keep the configuration in .oxlintrc.json alone."
               status=1
             fi
-            if jq -e 'has("plugins") and (.plugins | index("typescript") | not)' <<< "$rules" > /dev/null; then
+            if jq -e 'has("plugins") and (.plugins | index("typescript") | not)' <<< "$config" > /dev/null; then
               echo "::error::The base's .oxlintrc.json leaves out the typescript plugin, which carries the rules on any and on ts comments: add typescript to its plugins."
               status=1
             fi

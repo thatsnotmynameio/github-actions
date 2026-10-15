@@ -1,0 +1,55 @@
+# What a release of this repository publishes: a GitHub release named after
+# its tag, with notes and no assets, since there is nothing to build. The
+# release workflow (.github/workflows/release.yml) runs it and says when a
+# release happens and which version it is.
+# The tag is only local: GitHub creates it at the built commit when the
+# release is published.
+version: 2
+
+project_name: github-actions
+
+builds:
+  - skip: true
+
+archives:
+  - formats: [none]
+
+checksum:
+  disable: true
+
+source:
+  enabled: false
+
+# The release notes: the commits since the last release, grouped by their
+# conventional-commit type, a breaking change (a "!" after the type) first.
+# Docs, tests, CI and chores stay out unless they break something. A group
+# reads only a commit's title.
+changelog:
+  use: git
+  sort: asc
+  abbrev: -1 # no commit hash: each title ends with its pull request
+  filters:
+    exclude:
+      - "^(docs|test|ci|chore)(\\(.+\\))?:"
+  groups:
+    - title: Breaking changes
+      regexp: "^\\w+(\\(.+\\))?!:"
+      order: 0
+    - title: Features
+      regexp: "^feat(\\(.+\\))?:"
+      order: 1
+    - title: Fixes
+      regexp: "^fix(\\(.+\\))?:"
+      order: 2
+    - title: Other changes
+      order: 999
+
+release:
+  name_template: "{{ .Tag }}"
+  make_latest: true
+  # A leftover draft of the same release, from a run that failed after
+  # creating it, is published instead of a second one.
+  use_existing_draft: true
+  # The commit this run built, never whatever main's head is when the release
+  # is published: a published release and its tag are final.
+  target_commitish: "{{ .FullCommit }}"

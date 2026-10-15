@@ -1,10 +1,11 @@
 // The type check's configuration, for typescript.yml: each tsconfig.json git
-// tracks moves to tsconfig.pull-request.json, next to it, and a generated
-// tsconfig.json extends it and turns the strictness on, so the pull request
-// keeps its paths, module resolution and types but cannot turn a check off.
-// At the root, the generated file also checks the base's files: its include
-// is the union of the base's and the pull request's, and its exclude the
-// base's.
+// tracks, and each configuration one of them reaches through references
+// (as a solution-style tsconfig.json does), moves to <name>.pull-request.json
+// next to it, and a generated file at its path extends it and turns the
+// strictness on, so the pull request keeps its paths, module resolution and
+// types but cannot turn a check off. At the root, the generated file also
+// checks the base's files: its include is the union of the base's and the
+// pull request's, and its exclude the base's.
 //
 //   node tsconfig.mjs <base tsconfig.json> <TypeScript version>
 //
@@ -12,14 +13,13 @@
 // does not exist means the base has none. Prints each generated file.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, normalize } from "node:path";
 import { parse, printParseErrorCode } from "jsonc-parser";
 
 const [basePath, version] = process.argv.slice(2);
 const [major, minor] = version.split(".").map(Number);
 const atLeast = (m, n) => major > m || (major === m && minor >= n);
 
-const PR_NAME = "tsconfig.pull-request.json";
 // TypeScript's default when a file has no exclude.
 const DEFAULT_EXCLUDE = ["node_modules", "bower_components", "jspm_packages"];
 // The strict family: strict: true sets them, but an explicit false in the
@@ -83,12 +83,36 @@ const tracked = execFileSync("git", ["ls-files", "-z", "--", "tsconfig.json", "*
   .split("\0")
   .filter(Boolean);
 
-for (const path of tracked) {
-  const renamed = join(dirname(path), PR_NAME);
+// A reference names a configuration file, or a directory with a
+// tsconfig.json; one outside the repository is not the pull request's to
+// check.
+function referenced(path, config) {
+  if (!Array.isArray(config.references)) return [];
+  return config.references
+    .map((reference) => (typeof reference?.path === "string" ? normalize(join(dirname(path), reference.path)) : null))
+    .filter((target) => target !== null && !target.startsWith(".."))
+    .map((target) => (target.endsWith(".json") ? target : join(target, "tsconfig.json")))
+    .filter((target) => existsSync(target));
+}
+
+const queue = [...tracked];
+const seen = new Set(queue);
+while (queue.length > 0) {
+  const path = queue.shift();
+  const renamed = join(dirname(path), `${basename(path, ".json")}.pull-request.json`);
   if (existsSync(renamed)) throw new Error(`${renamed}: the name the check moves ${path} to is taken`);
   const own = read(path);
+  for (const target of referenced(path, own)) {
+    if (!seen.has(target)) {
+      seen.add(target);
+      queue.push(target);
+    }
+  }
   renameSync(path, renamed);
-  const generated = { extends: `./${PR_NAME}`, compilerOptions };
+  const generated = { extends: `./${basename(renamed)}`, compilerOptions };
+  // extends does not carry references, which a files: [] configuration
+  // needs to be valid.
+  if (Array.isArray(own.references)) generated.references = own.references;
   if (path === "tsconfig.json") {
     generated.include = [...new Set([...(base ? selection(base) : []), ...selection(own)])];
     generated.exclude = Array.isArray(base?.exclude) ? base.exclude : DEFAULT_EXCLUDE;

@@ -22,9 +22,9 @@ jobs:
     permissions:
       contents: read
       security-events: write # uploads the results to code scanning
-    uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@802fdb1ebc353919a700b16ccc062ad16f198d28 # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@4891126d3412ef2cf8c1f9c6b60d77e7f5d76201 # v0.1.0
   grype:
     permissions:
       contents: read
       security-events: write # uploads the results to code scanning
-    uses: thatsnotmynameio/github-actions/.github/workflows/grype.yml@802fdb1ebc353919a700b16ccc062ad16f198d28 # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/grype.yml@4891126d3412ef2cf8c1f9c6b60d77e7f5d76201 # v0.1.0

@@ -1,0 +1,1182 @@
+# A TypeScript project's checks, on Linux: an install under the
+# organization's pnpm policy, oxfmt's formatting, the type check with the
+# project's own TypeScript, oxlint, the production imports with knip, the
+# tests with Vitest and coverage, and the coverage floor; then the project's
+# build and, when it has a Dockerfile, its image. An organization ruleset
+# requires it on every pull request of the TypeScript repositories it
+# targets, so a repository needs no file of its own, and a pull request
+# cannot change or skip it. A repository also calls it with workflow_call on
+# each push to main, which gives code scanning the analysis of main that a
+# pull request's oxlint alerts are compared against.
+# A ruleset ignores the triggers' filters and runs it only on pull_request and
+# merge_group.
+# A project is one package at the repository root: package.json,
+# pnpm-lock.yaml and tsconfig.json. A repository without package.json has
+# nothing to check: only the setup job runs.
+# The settings that could turn a check off come from the base commit, never
+# from the pull request: .github/typescript.yml, the exceptions to pnpm's
+# policy in pnpm-workspace.yaml, oxlint's .oxlintrc.json and .eslintignore,
+# oxfmt's .oxfmtrc.json and .prettierignore, knip's knip.json, and the root
+# tsconfig.json's file selection and strictness. A change to them applies
+# once it merges. What the pull request builds and tests is its own:
+# package.json, pnpm-lock.yaml, the code, the rest of each tsconfig.json and
+# the Dockerfile.
+# pnpm's policy is this workflow's, set in the environment, which wins over
+# the project's pnpm-workspace.yaml: every version in the lockfile at least a
+# day old and no weaker in trust evidence than the versions before it, the
+# dependency scripts the base allows and no others, no pnpmfile, and this
+# workflow's pnpm whatever the project pins. A dependency from a git
+# repository or a tarball installs only when the base lists it.
+# The tools this workflow runs are at the versions in env, which each job
+# installs under the same policy.
+# Known vulnerabilities in the dependencies are grype's ("tnmn.io: grype"),
+# which reads pnpm-lock.yaml.
+# The tests' results go to Trunk Flaky Tests when .github/typescript.yml
+# names test collections (see the trunk job).
+# Only the trunk job holds a secret, Trunk's token, and it runs none of the
+# project's code: on a Dependabot pull request the updated project runs in
+# the other jobs, which hold none.
+name: "tnmn.io: typescript"
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+    secrets:
+      # Trunk's organization token, for the trunk job. Without it, no result
+      # goes to Trunk.
+      TRUNK_API_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+# bash with pipefail (GitHub's bash -eo pipefail), so a failure anywhere in a
+# pipeline fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  PNPM_VERSION: 12.10.1
+  NODE_VERSION: 24
+  TRUNK_CLI_VERSION: 0.16.0
+  # oxlint's type-aware rules need the oxlint-tsgolint its release names.
+  OXLINT_VERSION: 1.87.0
+  OXLINT_TSGOLINT_VERSION: 7.0.2003
+  OXFMT_VERSION: 0.72.0
+  KNIP_VERSION: 6.40.0
+  JSONC_PARSER_VERSION: 3.3.1
+  ISTANBUL_LIB_COVERAGE_VERSION: 3.2.2
+  # pnpm's policy, the same in every repository. Each installing job adds the
+  # store and cache under $RUNNER_TEMP and the base's exceptions, then checks
+  # that pnpm took every value.
+  pnpm_config_minimum_release_age: 1440
+  pnpm_config_minimum_release_age_strict: true
+  pnpm_config_trust_policy: no-downgrade
+  pnpm_config_trust_lockfile: false
+  pnpm_config_dangerously_allow_all_builds: false
+  # A dependency script the base has not allowed is skipped with a warning.
+  pnpm_config_strict_dep_builds: false
+  # The setup job checks every git and tarball dependency, direct or not,
+  # against the base's list.
+  pnpm_config_block_exotic_subdeps: false
+  # The project's packageManager or devEngines.packageManager neither
+  # switches pnpm nor fails the install.
+  pnpm_config_pm_on_fail: ignore
+  pnpm_config_verify_store_integrity: true
+  pnpm_config_side_effects_cache: false
+  pnpm_config_registry: https://registry.npmjs.org/
+
+jobs:
+  # Reads .github/typescript.yml from the base commit:
+  #
+  #   # The coverage floor: the least total coverage, in percent, of the
+  #   # lines the tests cover (none by default).
+  #   coverage: 90
+  #   # The coverage provider, v8 or istanbul (v8 by default).
+  #   coverage-provider: v8
+  #   # Trunk Flaky Tests' test collections, by their 8-character IDs, each
+  #   # with the vitest arguments that pick its tests (all of them without
+  #   # any). The tests run in a job of their own for each. None by default:
+  #   # the tests run in one job, and nothing goes to Trunk.
+  #   trunk:
+  #     - collection: AbC12345
+  #       vitest: [test/worker]
+  #     - collection: XyZ98765
+  #       vitest: [--exclude=test/worker/**]
+  #   # The dependencies pnpm-lock.yaml may resolve outside the registry,
+  #   # each by its exact source: a git repository at one commit, or a
+  #   # tarball (a URL, or a committed file:) with its integrity.
+  #   exotic-dependencies:
+  #     - repo: https://github.com/someone/foo.git
+  #       commit: 0123456789abcdef0123456789abcdef01234567
+  #     - tarball: https://codeload.github.com/someone/bar/tar.gz/0123456789abcdef0123456789abcdef01234567
+  #       integrity: sha512-...
+  setup:
+    name: "tnmn.io: typescript (setup)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      project: ${{ steps.tree.outputs.project }}
+      build: ${{ steps.tree.outputs.build }}
+      image: ${{ steps.tree.outputs.image }}
+      coverage: ${{ steps.config.outputs.coverage }}
+      provider: ${{ steps.config.outputs.provider }}
+      include: ${{ steps.config.outputs.include }}
+      trunk: ${{ steps.config.outputs.trunk }}
+      tests: ${{ steps.config.outputs.tests }}
+      base-typescript: ${{ steps.config.outputs.base-typescript }}
+      policy: ${{ steps.config.outputs.policy }}
+    steps:
+      # Only the files that decide which jobs run and how the project
+      # installs, at the commit checked.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            package.json
+            pnpm-lock.yaml
+            pnpm-workspace.yaml
+            .npmrc
+            tsconfig.json
+            Dockerfile
+          sparse-checkout-cone-mode: false
+      # A project is checked against its pnpm-lock.yaml and tsconfig.json,
+      # so one without them fails here. It builds when package.json has a
+      # build script.
+      - id: tree
+        name: Project, build and image
+        run: |
+          if [ -f package.json ]; then
+            status=0
+            if [ ! -f pnpm-lock.yaml ]; then
+              echo "::error::package.json without pnpm-lock.yaml: run pnpm install and commit it."
+              status=1
+            fi
+            if [ ! -f tsconfig.json ]; then
+              echo "::error::package.json without tsconfig.json: commit the project's TypeScript configuration."
+              status=1
+            fi
+            [ "$status" -eq 0 ] || exit 1
+            echo "project=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No package.json: nothing to check."
+            echo "project=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f package.json ] && jq -e '.scripts.build | type == "string"' package.json > /dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f Dockerfile ]; then
+            echo "image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Only the configuration, at the base commit; on a push, at the pushed
+      # commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            .github/typescript.yml
+            package.json
+            pnpm-lock.yaml
+            pnpm-workspace.yaml
+            .npmrc
+          sparse-checkout-cone-mode: false
+      # Every value is checked here, so the jobs below can use them as they
+      # are: a percentage, a provider, the collections and the test jobs'
+      # matrix, the files coverage measures (src/ when the project has it,
+      # in the base's tree once the base is a project), the base's
+      # TypeScript major, and the base's exceptions to pnpm's policy, in
+      # base64, since an allowBuilds key can be a URL. A key the base's
+      # allowBuilds leaves unanswered (pnpm's placeholder) allows nothing.
+      - id: config
+        name: Configuration from the base
+        env:
+          PROJECT: ${{ steps.tree.outputs.project }}
+        run: |
+          base=.base-config
+          if [ -f "$base/package.json" ] && [ "$PROJECT" != true ]; then
+            echo "::error::The base has package.json and this commit does not: the TypeScript checks would stop. A repository that stops being a TypeScript project leaves the ruleset first."
+            exit 1
+          fi
+          config="$base/.github/typescript.yml"
+          if [ -f "$config" ]; then
+            json="$(yq -o=json -I=0 '. // {}' "$config")"
+          else
+            json='{}'
+          fi
+          jq -e 'type == "object"' <<< "$json" > /dev/null || { echo "::error::.github/typescript.yml: a map of settings."; exit 1; }
+          jq -r '
+            (keys - ["coverage", "coverage-provider", "trunk", "exotic-dependencies"])
+            | if length > 0 then error("unknown settings: \(join(", "))") else empty end
+          ' <<< "$json"
+          coverage="$(jq -r '
+            (.coverage // "")
+            | if . == "" or (type == "number" and . >= 0 and . <= 100) then . else error("coverage: a percentage, from 0 to 100") end
+          ' <<< "$json")"
+          provider="$(jq -r '
+            (."coverage-provider" // "v8")
+            | if . == "v8" or . == "istanbul" then . else error("coverage-provider: v8 or istanbul") end
+          ' <<< "$json")"
+          trunk="$(jq -c '
+            (.trunk // [])
+            | if type != "array" or any(.[];
+                type != "object"
+                or (keys - ["collection", "vitest"] | length) > 0
+                or (.collection | type) != "string" or (.collection | test("^[A-Za-z0-9]{8}$") | not)
+                or (has("vitest") and ((.vitest | type) != "array" or any(.vitest[]; type != "string"))))
+              then error("trunk: a list of {collection: an 8-character ID, vitest: a list of vitest arguments}") else . end
+            | to_entries | map({index: .key, collection: .value.collection, vitest: (.value.vitest // [])})
+          ' <<< "$json")"
+          if [ "$trunk" = "[]" ]; then
+            tests='[{"index":0,"collection":"","vitest":[]}]'
+            trunk=""
+          else
+            tests="$trunk"
+          fi
+          jq -e '
+            (."exotic-dependencies" // [])
+            | if type != "array" or any(.[];
+                type != "object"
+                or ((keys == ["commit", "repo"] and (.repo | type) == "string" and (.commit | type) == "string" and (.commit | test("^[0-9a-f]{40}$")))
+                    or (keys == ["integrity", "tarball"] and (.tarball | type) == "string" and (.integrity | type) == "string")
+                  | not))
+              then error("exotic-dependencies: a list of {repo, commit: 40 hex digits} or {tarball, integrity}") else true end
+          ' <<< "$json" > /dev/null
+          jq -c '."exotic-dependencies" // []' <<< "$json" > "$RUNNER_TEMP/exotic-dependencies.json"
+          if [ -f "$base/package.json" ]; then
+            tree="$(git -C "$base" ls-tree -d --name-only HEAD -- src)"
+          else
+            tree="$(git ls-tree -d --name-only HEAD -- src)"
+          fi
+          if [ -n "$tree" ]; then include='src/**'; else include='**'; fi
+          base_typescript=""
+          if [ -f "$base/pnpm-lock.yaml" ]; then
+            base_typescript="$(yq -o=json -I=0 '.importers["."] // {}' "$base/pnpm-lock.yaml" | jq -r '
+              (.devDependencies.typescript // .dependencies.typescript // {}).version // ""
+              | capture("^(?<major>[0-9]+)\\.").major // ""
+            ')"
+          fi
+          if [ -f "$base/pnpm-workspace.yaml" ]; then
+            workspace="$(yq -o=json -I=0 '. // {}' "$base/pnpm-workspace.yaml")"
+          else
+            workspace='{}'
+          fi
+          policy="$(jq -c '
+            def strings(name): (.[name] // []) | if type == "array" and all(.[]; type == "string") then . else error("pnpm-workspace.yaml: \(name), a list of package selectors") end;
+            {
+              minimumReleaseAgeExclude: strings("minimumReleaseAgeExclude"),
+              trustPolicyExclude: strings("trustPolicyExclude"),
+              trustPolicyIgnoreAfter: ((.trustPolicyIgnoreAfter // 52560000) | if type == "number" and . >= 0 then . else error("pnpm-workspace.yaml: trustPolicyIgnoreAfter, a number of minutes") end),
+              allowBuilds: ((.allowBuilds // {}) | if type == "object" then with_entries(select(.value | type == "boolean")) else error("pnpm-workspace.yaml: allowBuilds, a map of package selectors to true or false") end)
+            }
+          ' <<< "$workspace")"
+          {
+            echo "coverage=$coverage"
+            echo "provider=$provider"
+            echo "include=$include"
+            echo "trunk=$trunk"
+            echo "tests=$tests"
+            echo "base-typescript=$base_typescript"
+            echo "policy=$(base64 -w0 <<< "$policy")"
+          } >> "$GITHUB_OUTPUT"
+      # The files a pull request could use to loosen the install, checked
+      # before anything installs: pnpm-workspace.yaml may not run code in
+      # the install or allow every build, and neither it nor .npmrc may send
+      # a package to a registry the base does not use. Every dependency
+      # pnpm-lock.yaml resolves outside the registry, from a git repository,
+      # a tarball URL or a committed tarball, direct or not and overrides
+      # included, must be one the base lists, by its exact source: such a
+      # dependency has no publish time or provenance for pnpm to check. The
+      # source is read from each entry's resolution, whatever its key says:
+      # a registry entry carries only its integrity, or the registry's own
+      # tarball URL for that name and version. Each scan's output is read
+      # in full first, so a parse error fails the step.
+      - name: Install sources
+        if: steps.tree.outputs.project == 'true'
+        run: |
+          base=.base-config
+          status=0
+          if [ -f pnpm-workspace.yaml ]; then
+            keys="$(yq -o=json -I=0 '. // {}' pnpm-workspace.yaml | jq -r '
+              to_entries[]
+              | select(.key == "configDependencies" or .key == "pnpmfile" or .key == "globalPnpmfile" or (.key == "dangerouslyAllowAllBuilds" and .value == true))
+              | .key')"
+            while read -r key; do
+              [ -n "$key" ] || continue
+              echo "::error file=pnpm-workspace.yaml::pnpm-workspace.yaml sets $key, which would run code in the install or allow every dependency script: the TypeScript checks install without it."
+              status=1
+            done <<< "$keys"
+          fi
+          # Each registry setting as key=value, from pnpm-workspace.yaml and
+          # .npmrc in a directory.
+          registries() {
+            if [ -f "$1/pnpm-workspace.yaml" ]; then
+              yq -o=json -I=0 '. // {}' "$1/pnpm-workspace.yaml" | jq -r '
+                (if has("registry") then "registry=\(.registry)" else empty end),
+                ((.registries // {}) | to_entries[] | "registries.\(.key)=\(.value | tojson)")'
+            fi
+            if [ -f "$1/.npmrc" ]; then
+              sed -nE 's/^[[:space:]]*((@[^:=[:space:]]+:)?registry)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1=\3/p' "$1/.npmrc"
+            fi
+          }
+          registries . | sort -u > "$RUNNER_TEMP/registries-head"
+          registries "$base" | sort -u > "$RUNNER_TEMP/registries-base"
+          while read -r setting; do
+            [ -n "$setting" ] || continue
+            echo "::error::This commit sets the registry $setting, which the base does not: a new registry comes in a pull request of its own."
+            status=1
+          done <<< "$(comm -23 "$RUNNER_TEMP/registries-head" "$RUNNER_TEMP/registries-base")"
+          hits="$(yq -o=json -I=0 '.packages // {}' pnpm-lock.yaml | jq -c --slurpfile allowed "$RUNNER_TEMP/exotic-dependencies.json" '
+            to_entries[]
+            | (.key | sub("\\(.*$"; "")) as $id
+            | ($id | if startswith("@") then "@" + (.[1:] | split("@")[0]) else split("@")[0] end) as $name
+            | ($id[($name | length) + 1:]) as $version
+            | .value.resolution as $r
+            | (if $r.type == "git" then {repo: $r.repo, commit: $r.commit}
+               elif ($r.tarball // "") != ""
+                 and $r.tarball != "https://registry.npmjs.org/\($name)/-/\($name | split("/") | last)-\($version).tgz"
+               then {tarball: $r.tarball, integrity: $r.integrity}
+               else empty end) as $source
+            | select(any($allowed[0][]; . == $source) | not)
+            | {key, source: $source}')"
+          while read -r hit; do
+            [ -n "$hit" ] || continue
+            echo "::error file=pnpm-lock.yaml::$(jq -r '"pnpm-lock.yaml resolves \(.key) outside the registry, from a source the base does not list. To allow it, add this to exotic-dependencies in the base'"'"'s .github/typescript.yml, in a pull request of its own: \(.source | tojson)"' <<< "$hit")"
+            status=1
+          done <<< "$hits"
+          rm -rf "$base"
+          exit "$status"
+
+  # The format, the types, the lint and the production imports. It runs the
+  # project's own TypeScript, and knip loads the project's configuration
+  # files, so it holds no write permission: oxlint's findings go to code
+  # scanning from the code-scanning job. Its install runs no dependency
+  # script: none of these needs one.
+  typescript:
+    name: "tnmn.io: typescript (lint)"
+    needs: setup
+    if: needs.setup.outputs.project == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # On a pull request, its head commit, not the test merge commit:
+      # oxlint's findings are filed under it (see the code-scanning job).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          path: .base-config
+          persist-credentials: false
+          sparse-checkout: |
+            tsconfig.json
+            .oxlintrc.json
+            .eslintignore
+            .oxfmtrc.json
+            .oxfmtrc.jsonc
+            .prettierignore
+            knip.json
+            knip.jsonc
+            .knip.json
+            .knip.jsonc
+            oxlint.config.*
+            oxfmt.config.*
+            knip.*
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ hashFiles('.node-version') != '' && '.node-version' || '' }}
+          node-version: ${{ hashFiles('.node-version') == '' && env.NODE_VERSION || '' }}
+          package-manager-cache: false
+      # No package.json for the action: the project's packageManager would
+      # fail it.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
+      - name: pnpm policy
+        env:
+          POLICY: ${{ needs.setup.outputs.policy }}
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      # At env's versions, out of the project's tree.
+      - name: Install the tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          jq -n '{private: true, dependencies: {
+              oxlint: env.OXLINT_VERSION, "oxlint-tsgolint": env.OXLINT_TSGOLINT_VERSION, oxfmt: env.OXFMT_VERSION,
+              knip: env.KNIP_VERSION, "jsonc-parser": env.JSONC_PARSER_VERSION}}' > "$RUNNER_TEMP/tools/package.json"
+          pnpm install --dir "$RUNNER_TEMP/tools" --no-frozen-lockfile --ignore-pnpmfile --ignore-scripts
+      # Every file a tool could find is deleted from the pull request's tree,
+      # and the base's file takes its path, so the paths inside it resolve as
+      # they do locally; each tool gets its configuration explicitly, an
+      # empty one when the base has none. A configuration in code would run
+      # here, so the base keeps it in JSON. oxlint runs only its built-in
+      # rules: a jsPlugins entry would load code from the project's
+      # node_modules, an extends entry files from the pull request, and the
+      # typescript plugin carries the rules on any and on ts comments. knip
+      # also reads package.json's knip field, which the knip step drops.
+      - id: base
+        name: Configuration from the base
+        run: |
+          base=.base-config
+          status=0
+          for f in "$base"/oxlint.config.* "$base"/oxfmt.config.* "$base"/knip.*; do
+            [ -e "$f" ] || continue
+            case "${f#"$base"/}" in
+              knip.json | knip.jsonc) ;;
+              *)
+                echo "::error::The base's ${f#"$base"/} is code, which would run here: keep the configuration in .oxlintrc.json, .oxfmtrc.json or knip.json."
+                status=1
+                ;;
+            esac
+          done
+          rm -f .oxlintrc.json .oxlintrc.jsonc oxlint.config.* oxlint-suppressions.json .eslintignore \
+            .oxfmtrc.json .oxfmtrc.jsonc oxfmt.config.* .prettierignore \
+            knip.json knip.jsonc .knip.json .knip.jsonc knip.ts knip.js knip.mjs knip.cjs knip.mts knip.cts knip.config.*
+          oxlint="$RUNNER_TEMP/oxlintrc.json"
+          echo '{}' > "$oxlint"
+          if [ -f "$base/.oxlintrc.json" ]; then
+            cp "$base/.oxlintrc.json" .oxlintrc.json
+            oxlint=.oxlintrc.json
+            # JSON with comments and trailing commas, as oxlint reads it.
+            config="$(node --input-type=module - .oxlintrc.json <<'EOF'
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const { parse, printParseErrorCode } = require("jsonc-parser");
+
+          const [path] = process.argv.slice(2);
+          const errors = [];
+          const value = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+          if (errors.length > 0) {
+            console.error(`${path}: not valid JSON (${printParseErrorCode(errors[0].error)})`);
+            process.exit(1);
+          }
+          console.log(JSON.stringify(value));
+          EOF
+            )"
+            if jq -e 'has("jsPlugins")' <<< "$config" > /dev/null; then
+              echo "::error::The base's .oxlintrc.json declares jsPlugins, whose code would come from the pull request's lockfile: oxlint runs its built-in rules only."
+              status=1
+            fi
+            if jq -e 'has("extends")' <<< "$config" > /dev/null; then
+              echo "::error::The base's .oxlintrc.json extends other files, which would come from the pull request: keep the configuration in .oxlintrc.json alone."
+              status=1
+            fi
+            if jq -e 'has("plugins") and (.plugins | index("typescript") | not)' <<< "$config" > /dev/null; then
+              echo "::error::The base's .oxlintrc.json leaves out the typescript plugin, which carries the rules on any and on ts comments: add typescript to its plugins."
+              status=1
+            fi
+          fi
+          eslintignore="$RUNNER_TEMP/eslintignore"
+          : > "$eslintignore"
+          if [ -f "$base/.eslintignore" ]; then
+            cp "$base/.eslintignore" .eslintignore
+            eslintignore=.eslintignore
+          fi
+          oxfmt="$RUNNER_TEMP/oxfmtrc.json"
+          echo '{}' > "$oxfmt"
+          for f in .oxfmtrc.json .oxfmtrc.jsonc; do
+            if [ -f "$base/$f" ]; then
+              cp "$base/$f" "$f"
+              oxfmt="$f"
+              break
+            fi
+          done
+          prettierignore=""
+          if [ -f "$base/.prettierignore" ]; then
+            cp "$base/.prettierignore" "$RUNNER_TEMP/prettierignore"
+            prettierignore="$RUNNER_TEMP/prettierignore"
+          fi
+          knip="$RUNNER_TEMP/knip.json"
+          echo '{}' > "$knip"
+          for f in knip.json knip.jsonc .knip.json .knip.jsonc; do
+            if [ -f "$base/$f" ]; then
+              cp "$base/$f" "$f"
+              knip="$f"
+              break
+            fi
+          done
+          if [ -f "$base/tsconfig.json" ]; then
+            cp "$base/tsconfig.json" "$RUNNER_TEMP/base-tsconfig.json"
+          fi
+          rm -rf "$base"
+          {
+            echo "oxlint=$oxlint"
+            echo "eslintignore=$eslintignore"
+            echo "oxfmt=$oxfmt"
+            echo "prettierignore=$prettierignore"
+            echo "knip=$knip"
+          } >> "$GITHUB_OUTPUT"
+          exit "$status"
+      # Every file git tracks that oxfmt formats, given by name: oxfmt then
+      # skips the ones it does not format, and reads neither the pull
+      # request's .gitignore nor its .prettierignore. The base's
+      # .prettierignore leaves out the files it lists.
+      - name: oxfmt
+        env:
+          OXFMT: ${{ steps.base.outputs.oxfmt }}
+          PRETTIERIGNORE: ${{ steps.base.outputs.prettierignore }}
+        run: |
+          export LC_ALL=C
+          if [ -n "$PRETTIERIGNORE" ]; then
+            mapfile -d '' files < <(comm -z -23 <(git ls-files -z | sort -z) <(git ls-files -z -c -i --exclude-from="$PRETTIERIGNORE" | sort -z))
+          else
+            mapfile -d '' files < <(git ls-files -z)
+          fi
+          : > "$RUNNER_TEMP/no-ignore"
+          "$RUNNER_TEMP/tools/node_modules/.bin/oxfmt" --check --disable-nested-config \
+            --config="$OXFMT" --ignore-path="$RUNNER_TEMP/no-ignore" --no-error-on-unmatched-pattern "${files[@]}"
+      - id: install
+        name: pnpm install
+        if: ${{ !cancelled() }}
+        run: pnpm install --frozen-lockfile --ignore-pnpmfile --ignore-scripts
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
+      - name: pnpm policy check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
+      # The project's own TypeScript, from its lockfile: below 7, the type
+      # check runs with it and warns, and oxlint runs without its type-aware
+      # rules, which need TypeScript 7; a pull request cannot lower it below
+      # 7 once the base is at 7.
+      - id: version
+        name: TypeScript's version
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          BASE: ${{ needs.setup.outputs.base-typescript }}
+        run: |
+          manifest=node_modules/typescript/package.json
+          if [ ! -f "$manifest" ]; then
+            echo "::error::No typescript in the install: add it with pnpm add -D typescript."
+            exit 1
+          fi
+          name="$(jq -r .name "$manifest")"
+          if [ "$name" != typescript ]; then
+            echo "::error::node_modules/typescript is $name: install typescript itself."
+            exit 1
+          fi
+          version="$(jq -r .version "$manifest")"
+          major="${version%%.*}"
+          type_aware=--type-aware
+          if [ "$major" -lt 7 ]; then
+            if [ -n "$BASE" ] && [ "$BASE" -ge 7 ]; then
+              echo "::error::TypeScript $version: the base is at TypeScript $BASE, and a pull request cannot lower it below 7."
+              exit 1
+            fi
+            echo "::warning::TypeScript $version: lint runs without its type-aware rules, which need TypeScript 7. Move the project to TypeScript 7."
+            type_aware=""
+          fi
+          {
+            echo "version=$version"
+            echo "type-aware=$type_aware"
+          } >> "$GITHUB_OUTPUT"
+      # Each tsconfig.json git tracks, and each configuration one of them
+      # reaches through references (as a solution-style tsconfig.json does),
+      # moves to <name>.pull-request.json next to it, and a generated file at
+      # its path extends it and turns the strictness on, so the pull request
+      # keeps its paths, module resolution and types but cannot turn a check
+      # off. At the root, the generated file also checks the base's files:
+      # its include is the union of the base's and the pull request's, and
+      # its exclude the base's. The project's tsc checks each generated file,
+      # and each finding becomes an annotation on the pull request's lines.
+      - name: tsc
+        if: ${{ !cancelled() && steps.version.outcome == 'success' }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node --input-type=module - "$RUNNER_TEMP/base-tsconfig.json" "$VERSION" > "$RUNNER_TEMP/tsconfigs" <<'EOF'
+          import { execFileSync } from "node:child_process";
+          import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+          import { basename, dirname, join, normalize } from "node:path";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const { parse, printParseErrorCode } = require("jsonc-parser");
+
+          const [basePath, version] = process.argv.slice(2);
+          const [major, minor] = version.split(".").map(Number);
+          const atLeast = (m, n) => major > m || (major === m && minor >= n);
+
+          // TypeScript's default when a file has no exclude.
+          const DEFAULT_EXCLUDE = ["node_modules", "bower_components", "jspm_packages"];
+          // The strict family: strict: true sets them, but an explicit false in the
+          // pull request's file would win over it. Each with the version that added it.
+          const STRICT_FAMILY = [
+            ["noImplicitAny", 0, 0],
+            ["noImplicitThis", 0, 0],
+            ["alwaysStrict", 0, 0],
+            ["strictNullChecks", 0, 0],
+            ["strictFunctionTypes", 0, 0],
+            ["strictBindCallApply", 0, 0],
+            ["strictPropertyInitialization", 0, 0],
+            ["useUnknownInCatchVariables", 4, 4],
+            ["strictBuiltinIteratorReturn", 5, 6],
+          ];
+          // Stricter checks outside the family, imposed when the base's root
+          // tsconfig.json sets them to true.
+          const BASE_FLAGS = [
+            ["noUncheckedIndexedAccess", 4, 1],
+            ["exactOptionalPropertyTypes", 4, 4],
+            ["noImplicitReturns", 0, 0],
+            ["noFallthroughCasesInSwitch", 0, 0],
+            ["noImplicitOverride", 4, 3],
+            ["noPropertyAccessFromIndexSignature", 4, 2],
+            ["noUnusedLocals", 0, 0],
+            ["noUnusedParameters", 0, 0],
+            ["noUncheckedSideEffectImports", 5, 6],
+          ];
+
+          function read(path) {
+            const errors = [];
+            const value = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+            if (errors.length > 0 || value === null || typeof value !== "object" || Array.isArray(value)) {
+              const reason = errors.length > 0 ? printParseErrorCode(errors[0].error) : "not an object";
+              throw new Error(`${path}: not a valid tsconfig.json (${reason})`);
+            }
+            return value;
+          }
+
+          // The files a configuration selects, as written in it, extends left aside:
+          // its include, none when it lists files only, every file when it has neither.
+          function selection(config) {
+            if (Array.isArray(config.include)) return config.include;
+            if (Array.isArray(config.files)) return [];
+            return ["**/*"];
+          }
+
+          const base = existsSync(basePath) ? read(basePath) : null;
+          const compilerOptions = { strict: true, noEmit: true, emitDeclarationOnly: false };
+          if (atLeast(5, 5)) compilerOptions.noCheck = false;
+          for (const [name, m, n] of STRICT_FAMILY) {
+            if (atLeast(m, n)) compilerOptions[name] = true;
+          }
+          for (const [name, m, n] of BASE_FLAGS) {
+            if (atLeast(m, n) && base?.compilerOptions?.[name] === true) compilerOptions[name] = true;
+          }
+
+          const tracked = execFileSync("git", ["ls-files", "-z", "--", "tsconfig.json", "*/tsconfig.json"], {
+            encoding: "utf8",
+          })
+            .split("\0")
+            .filter(Boolean);
+
+          // A reference names a configuration file, or a directory with a
+          // tsconfig.json; one outside the repository is not the pull request's to
+          // check.
+          function referenced(path, config) {
+            if (!Array.isArray(config.references)) return [];
+            return config.references
+              .map((reference) => (typeof reference?.path === "string" ? normalize(join(dirname(path), reference.path)) : null))
+              .filter((target) => target !== null && !target.startsWith(".."))
+              .map((target) => (target.endsWith(".json") ? target : join(target, "tsconfig.json")))
+              .filter((target) => existsSync(target));
+          }
+
+          const queue = [...tracked];
+          const seen = new Set(queue);
+          while (queue.length > 0) {
+            const path = queue.shift();
+            const renamed = join(dirname(path), `${basename(path, ".json")}.pull-request.json`);
+            if (existsSync(renamed)) throw new Error(`${renamed}: the name the check moves ${path} to is taken`);
+            const own = read(path);
+            for (const target of referenced(path, own)) {
+              if (!seen.has(target)) {
+                seen.add(target);
+                queue.push(target);
+              }
+            }
+            renameSync(path, renamed);
+            const generated = { extends: `./${basename(renamed)}`, compilerOptions };
+            if (path === "tsconfig.json") {
+              generated.include = [...new Set([...(base ? selection(base) : []), ...selection(own)])];
+              generated.exclude = Array.isArray(base?.exclude) ? base.exclude : DEFAULT_EXCLUDE;
+            }
+            // extends does not carry references, which a configuration naming no file
+            // (files: [] and no include, as a solution-style tsconfig.json) needs to
+            // be valid. One that names files keeps none: with references, tsc would
+            // require each referenced project to emit, and each is checked on its own
+            // here.
+            const include = generated.include ?? own.include;
+            const namesNone = (Array.isArray(include) ? include.length === 0 : Array.isArray(own.files)) && !(own.files?.length > 0);
+            if (Array.isArray(own.references) && namesNone) generated.references = own.references;
+            writeFileSync(path, `${JSON.stringify(generated, null, 2)}\n`);
+            console.log(path);
+          }
+          EOF
+          status=0
+          while IFS= read -r config; do
+            echo "tsc -p $config"
+            node_modules/.bin/tsc -p "$config" --pretty false > "$RUNNER_TEMP/tsc.txt" || status=1
+            jq -Rnr '
+              def data: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+              def property: data | gsub(":"; "%3A") | gsub(","; "%2C");
+              reduce inputs as $line ([];
+                if ($line | test("^\\s")) and length > 0 then .[-1] += "\n" + ($line | sub("^\\s+"; "")) else . + [$line] end)
+              | .[]
+              | (capture("^(?<file>[^(]+)\\((?<line>[0-9]+),(?<col>[0-9]+)\\): (?<severity>error|warning) (?<code>TS[0-9]+): (?<message>.*)$"; "s") // null) as $d
+              | if $d then
+                  "::\($d.severity) file=\($d.file | property),line=\($d.line),col=\($d.col),title=\("tsc \($d.code)" | property)"
+                  + "::\("\($d.file):\($d.line): \($d.message)" | data)"
+                elif test("^error TS") then "::error::\(data)"
+                elif . != "" then .
+                else empty end
+            ' "$RUNNER_TEMP/tsc.txt"
+          done < "$RUNNER_TEMP/tsconfigs"
+          exit "$status"
+      # The JavaScript and TypeScript files git tracks, given by name, so the
+      # pull request's .gitignore and .eslintignore hide none; the base's
+      # .eslintignore leaves out the files it lists. Nested configurations
+      # are off, and oxlint-suppressions.json was deleted. any and ts
+      # comments are always errors. The findings also go to a SARIF file,
+      # which the code-scanning job uploads. Type-aware rules run through
+      # this workflow's tsgolint, never one from the project's node_modules.
+      - name: oxlint
+        if: ${{ !cancelled() && steps.version.outcome == 'success' }}
+        env:
+          OXLINT: ${{ steps.base.outputs.oxlint }}
+          ESLINTIGNORE: ${{ steps.base.outputs.eslintignore }}
+          TYPE_AWARE: ${{ steps.version.outputs.type-aware }}
+        run: |
+          tools="$RUNNER_TEMP/tools/node_modules/.bin"
+          export OXLINT_TSGOLINT_PATH="$tools/tsgolint"
+          mapfile -d '' files < <(git ls-files -z -- '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::No JavaScript or TypeScript file: nothing to lint."
+            exit 0
+          fi
+          args=(--config="$OXLINT" --disable-nested-config --ignore-path="$ESLINTIGNORE" --no-error-on-unmatched-pattern
+            -D typescript/no-explicit-any -D typescript/ban-ts-comment)
+          if [ -n "$TYPE_AWARE" ]; then args+=("$TYPE_AWARE"); fi
+          status=0
+          "$tools/oxlint" "${args[@]}" --format=github "${files[@]}" || status=$?
+          "$tools/oxlint" "${args[@]}" --format=sarif "${files[@]}" > oxlint.sarif || true
+          exit "$status"
+      # Kept as soon as oxlint writes it, before the knip step loads the
+      # project's configuration files, which could rewrite it.
+      - if: ${{ !cancelled() && hashFiles('oxlint.sarif') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oxlint-sarif
+          path: oxlint.sarif
+          retention-days: 1
+      # A comment that turns off the rules on any or on ts comments, or every
+      # rule (a directive that names none), in any file git tracks: other
+      # disable comments are the pull request's, as # noqa is in Python.
+      - name: Disable comments
+        if: ${{ !cancelled() }}
+        run: |
+          mapfile -d '' files < <(git ls-files -z -- '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs')
+          [ "${#files[@]}" -gt 0 ] || exit 0
+          status=0
+          while IFS=: read -r file line text; do
+            rules="$(sed -E 's#.*(oxlint|eslint)-disable(-next-line|-line)?##; s#\*/.*##; s#[[:space:]]--[[:space:]].*##; s#^[[:space:]]+##; s#[[:space:]]+$##' <<< "$text")"
+            if [ -z "$rules" ] || grep -qE '(^|[[:space:],/])(no-explicit-any|ban-ts-comment)([[:space:],]|$)' <<< "$rules"; then
+              echo "::error file=$file,line=$line,title=disable comment::${rules:-Every rule} turned off: the rules on any and on ts comments stay on."
+              status=1
+            fi
+          done < <(grep -nHE '(//|/\*+)[[:space:]]*(oxlint|eslint)-disable(-next-line|-line)?([[:space:]]|\*/|$)' -- "${files[@]}" || true)
+          exit "$status"
+      # A package production code imports must be a dependency, not only a
+      # devDependency: a bundle ships it all the same.
+      - name: knip
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          KNIP: ${{ steps.base.outputs.knip }}
+        run: |
+          jq 'del(.knip)' package.json > "$RUNNER_TEMP/package.json"
+          cp "$RUNNER_TEMP/package.json" package.json
+          "$RUNNER_TEMP/tools/node_modules/.bin/knip" --config="$KNIP" --strict --include unlisted \
+            --no-config-hints --no-progress --reporter github-actions
+
+  # Uploads oxlint's findings to code scanning, after a failed lint too, so
+  # its findings show; not when lint never ran. The only job that can write
+  # to code scanning, and it runs none of the project's code. On a pull
+  # request, filed under its head commit: GitHub makes a new merge commit
+  # when it rechecks the pull request (a ruleset change or a merge attempt),
+  # and code scanning would then wait for results on the new one. A private
+  # repository without GitHub Code Security has no code scanning: there the
+  # findings only show in the log.
+  code-scanning:
+    name: "tnmn.io: typescript (code scanning)"
+    needs: [setup, typescript]
+    if: ${{ !cancelled() && needs.setup.outputs.project == 'true' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # uploads oxlint's findings to code scanning
+    steps:
+      # The sources, for code scanning's fingerprints of the findings' lines.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # A pattern, not a name: a lint job that wrote no SARIF leaves none,
+      # and there is then nothing to upload. The one artifact it matches
+      # lands in .oxlint/ itself, in the workspace, where hashFiles looks.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: oxlint-sarif
+          path: .oxlint
+      - if: hashFiles('.oxlint/oxlint.sarif') != ''
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: .oxlint/oxlint.sarif
+          category: oxlint
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || '' }}
+          sha: ${{ github.event.pull_request.head.sha || '' }}
+
+  # The project's own Vitest, from its lockfile, after an install that runs
+  # the dependency scripts the base allows: once, or once for each of Trunk's
+  # collections, with its arguments. A project without test files has none
+  # to run, and passes; so does a collection whose arguments select no test.
+  # Coverage, with the base's provider when the project has it installed,
+  # measures src/ when the project has it and the whole project otherwise,
+  # test, declaration and configuration files left out, whatever the
+  # project's Vitest configuration says: the command line wins over it. With
+  # a floor, each job keeps its coverage data for the coverage job, and with
+  # a collection its JUnit report for the trunk job.
+  test:
+    name: "tnmn.io: typescript (test${{ matrix.collection && format(' {0}', matrix.collection) || '' }})"
+    needs: setup
+    if: needs.setup.outputs.project == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # One collection's failure does not cancel the others' runs.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.tests) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ hashFiles('.node-version') != '' && '.node-version' || '' }}
+          node-version: ${{ hashFiles('.node-version') == '' && env.NODE_VERSION || '' }}
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
+      - name: pnpm policy
+        env:
+          POLICY: ${{ needs.setup.outputs.policy }}
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile --ignore-pnpmfile
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
+      - name: pnpm policy check
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
+      - name: vitest
+        env:
+          COLLECTION: ${{ matrix.collection }}
+          VITEST_ARGS: ${{ toJSON(matrix.vitest) }}
+          FLOOR: ${{ needs.setup.outputs.coverage }}
+          PROVIDER: ${{ needs.setup.outputs.provider }}
+          INCLUDE: ${{ needs.setup.outputs.include }}
+        run: |
+          if [ -z "$(git ls-files -- '*.test.*' '*.spec.*')" ]; then
+            echo "::notice::No test file: nothing to test."
+            exit 0
+          fi
+          if [ ! -f node_modules/vitest/package.json ]; then
+            echo "::error::Test files but no vitest: add it with pnpm add -D vitest."
+            exit 1
+          fi
+          coverage=()
+          if [ -f "node_modules/@vitest/coverage-$PROVIDER/package.json" ]; then
+            coverage=(--coverage.enabled --coverage.provider="$PROVIDER" --coverage.include="$INCLUDE"
+              --coverage.exclude='**/*.{test,spec}.?(c|m)[jt]s?(x)' --coverage.exclude='**/{test,tests,__tests__}/**'
+              --coverage.exclude='**/*.d.ts' --coverage.exclude='**/*.config.*'
+              --coverage.exclude='**/dist/**' --coverage.exclude='**/node_modules/**'
+              --coverage.reporter=json --coverage.reporter=text-summary --coverage.reportsDirectory="$RUNNER_TEMP/coverage")
+          elif [ -n "$FLOOR" ]; then
+            echo "::error::A coverage floor, but no @vitest/coverage-$PROVIDER: add it with pnpm add -D @vitest/coverage-$PROVIDER@$(jq -r .version node_modules/vitest/package.json)."
+            exit 1
+          else
+            echo "::notice::No @vitest/coverage-$PROVIDER: the tests run without coverage."
+          fi
+          reporters=()
+          if [ -n "$COLLECTION" ]; then
+            reporters=(--reporter=default --reporter=junit --outputFile.junit="$RUNNER_TEMP/junit.xml" --passWithNoTests)
+          fi
+          mapfile -d '' args < <(jq -j '.[] | . + "\u0000"' <<< "$VITEST_ARGS")
+          node_modules/.bin/vitest run "${coverage[@]}" "${reporters[@]}" "${args[@]}"
+      - if: ${{ !cancelled() && needs.setup.outputs.coverage != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.index }}
+          path: ${{ runner.temp }}/coverage/coverage-final.json
+          if-no-files-found: ignore
+          retention-days: 1
+      - if: ${{ !cancelled() && matrix.collection != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: junit-${{ matrix.index }}
+          path: ${{ runner.temp }}/junit.xml
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # The total of the lines the test jobs covered, merged by this workflow's
+  # istanbul-lib-coverage, when every test
+  # job passed. Without coverage data (no test file, or every test
+  # deleted), it fails: a floor needs tests. A threshold in the project's
+  # Vitest configuration plays no part. It runs none of the project's code.
+  coverage:
+    name: "tnmn.io: typescript (coverage)"
+    needs: [setup, test]
+    if: needs.setup.outputs.coverage != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
+      - name: pnpm policy
+        env:
+          POLICY: ${{ needs.setup.outputs.policy }}
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      # At env's version, out of the project's tree.
+      - name: Install the tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          jq -n '{private: true, dependencies: {"istanbul-lib-coverage": env.ISTANBUL_LIB_COVERAGE_VERSION}}' > "$RUNNER_TEMP/tools/package.json"
+          pnpm install --dir "$RUNNER_TEMP/tools" --no-frozen-lockfile --ignore-pnpmfile --ignore-scripts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          path: ${{ runner.temp }}/coverage
+      - name: coverage floor
+        env:
+          FLOOR: ${{ needs.setup.outputs.coverage }}
+        run: |
+          mapfile -d '' files < <(find "$RUNNER_TEMP/coverage" -name coverage-final.json -print0 2> /dev/null)
+          node --input-type=module - "$FLOOR" "${files[@]}" <<'EOF'
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const libCoverage = require("istanbul-lib-coverage");
+
+          const [floor, ...files] = process.argv.slice(2);
+          const map = libCoverage.createCoverageMap({});
+          for (const file of files) map.merge(JSON.parse(readFileSync(file, "utf8")));
+          const lines = map.getCoverageSummary().lines;
+          if (lines.total === 0) {
+            console.log("::error::No coverage data: the tests measured no line.");
+            process.exit(1);
+          }
+          const total = lines.pct;
+          if (total >= Number(floor)) {
+            console.log(`Total coverage: ${total}%, at or above the floor of ${floor}%.`);
+          } else {
+            console.log(`::error::Total coverage ${total}% is below the floor of ${floor}%.`);
+            process.exit(1);
+          }
+          EOF
+
+  # Sends each collection's JUnit report to Trunk Flaky Tests, through Trunk's
+  # uploader, when the base's .github/typescript.yml names collections. The
+  # only job with a secret, Trunk's token: it runs none of the project's code
+  # and checks out nothing, so the uploader gets the repository, commit and
+  # branch from the run. Without the token (on a Dependabot or a fork's pull
+  # request, or where the secret does not reach) it sends nothing, and a
+  # failed upload never fails the check. Upload alone: quarantining would
+  # need the token where the tests run.
+  trunk:
+    name: "tnmn.io: typescript (trunk ${{ matrix.collection }})"
+    needs: [setup, test]
+    if: ${{ !cancelled() && needs.setup.outputs.trunk != '' && needs.test.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.tests) }}
+    steps:
+      - id: token
+        name: Trunk's token and organization
+        env:
+          TRUNK_API_TOKEN: ${{ secrets.TRUNK_API_TOKEN }}
+          TRUNK_ORG_URL_SLUG: ${{ vars.TRUNK_ORG_URL_SLUG }}
+        run: |
+          if [ -z "$TRUNK_API_TOKEN" ] || [ -z "$TRUNK_ORG_URL_SLUG" ]; then
+            echo "::notice::No TRUNK_API_TOKEN secret or TRUNK_ORG_URL_SLUG variable here: nothing goes to Trunk."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+      # A pattern, not a name: a test job that wrote no report leaves none,
+      # and there is then nothing to send. The one artifact it matches lands
+      # in junit/ itself, in the workspace (empty, with no checkout), where
+      # hashFiles looks.
+      - if: steps.token.outputs.found == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: junit-${{ matrix.index }}
+          path: junit
+      - if: ${{ steps.token.outputs.found == 'true' && hashFiles('junit/junit.xml') != '' }}
+        continue-on-error: true
+        uses: trunk-io/analytics-uploader@a86313c7029d22e6ea2d5c346060a224d90053dc # v2.1.6
+        with:
+          junit-paths: junit/junit.xml
+          org-slug: ${{ vars.TRUNK_ORG_URL_SLUG }}
+          token: ${{ secrets.TRUNK_API_TOKEN }}
+          test-collection-id: ${{ matrix.collection }}
+          cli-version: ${{ env.TRUNK_CLI_VERSION }}
+          # No cache: an entry a pull request's own workflow wrote under the
+          # same key would run here, next to the token.
+          use-cache: false
+          use-uncloned-repo: true
+          # The pull request's by default; a push's and a merge queue's here.
+          gh-repo-url: ${{ github.event.pull_request.base.repo.html_url || format('{0}/{1}', github.server_url, github.repository) }}
+          gh-repo-head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+          repo-head-branch: ${{ github.head_ref || github.ref_name }}
+
+  # The release build: the project's build script, after an install that runs
+  # the dependency scripts the base allows, and its image when it has a
+  # Dockerfile, published nowhere. A change that breaks either fails here,
+  # not when it is released. No cache, as in a release: the build reads
+  # nothing another workflow could have written.
+  build:
+    name: "tnmn.io: typescript (build)"
+    needs: setup
+    if: needs.setup.outputs.project == 'true' && (needs.setup.outputs.build == 'true' || needs.setup.outputs.image == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - if: needs.setup.outputs.build == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ hashFiles('.node-version') != '' && '.node-version' || '' }}
+          node-version: ${{ hashFiles('.node-version') == '' && env.NODE_VERSION || '' }}
+          package-manager-cache: false
+      - if: needs.setup.outputs.build == 'true'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
+      - name: pnpm policy
+        if: needs.setup.outputs.build == 'true'
+        env:
+          POLICY: ${{ needs.setup.outputs.policy }}
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      - name: pnpm install
+        if: needs.setup.outputs.build == 'true'
+        run: pnpm install --frozen-lockfile --ignore-pnpmfile
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
+      - name: pnpm policy check
+        if: needs.setup.outputs.build == 'true'
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
+      - name: pnpm run build
+        if: needs.setup.outputs.build == 'true'
+        run: pnpm run build
+      - name: docker build
+        if: needs.setup.outputs.image == 'true'
+        run: docker build .

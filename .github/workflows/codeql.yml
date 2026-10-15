@@ -1,7 +1,8 @@
 # CodeQL's advanced setup, with the security-extended suite, published to
 # code scanning: the Go module, test files included, when the repository has
-# go.mod, the Python project when it has pyproject.toml, and the GitHub
-# Actions workflows. A repository calls it with
+# go.mod, the Python project when it has pyproject.toml, the JavaScript and
+# TypeScript project when it has package.json, and the GitHub Actions
+# workflows. A repository calls it with
 # workflow_call from its own workflow, on every pull request, on each push to
 # main and daily: GitHub does not allow CodeQL's init and analyze actions in a
 # workflow a ruleset requires, so no organization ruleset can run it.
@@ -14,9 +15,10 @@
 #       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 #
 # Its checks are "<caller job> / codeql (go)", "<caller job> / codeql
-# (python)" and "<caller job> / codeql (actions)". Code scanning tells
-# analyses apart by the caller's workflow and job, the category
-# (/language:go, /language:python, /language:actions) and the matrix values
+# (python)", "<caller job> / codeql (javascript-typescript)" and "<caller
+# job> / codeql (actions)". Code scanning tells analyses apart by the
+# caller's workflow and job, the category (/language:go, /language:python,
+# /language:javascript-typescript, /language:actions) and the matrix values
 # (language, build-mode): a change to any of them leaves the old analysis's
 # alerts open on main.
 # The configuration (.github/codeql/codeql-config.yml) comes from the base
@@ -36,8 +38,10 @@ permissions:
 
 jobs:
   # The languages to analyze: Go when the commit has go.mod, Python when it
-  # has pyproject.toml, and always the workflows of the repository that calls
-  # this one. Python needs no build: CodeQL reads its source as it is.
+  # has pyproject.toml, JavaScript and TypeScript when it has package.json,
+  # and always the workflows of the repository that calls this one. Python,
+  # JavaScript and TypeScript need no build: CodeQL reads their source as it
+  # is.
   setup:
     name: codeql (setup)
     runs-on: ubuntu-latest
@@ -52,11 +56,15 @@ jobs:
           sparse-checkout: |
             go.mod
             pyproject.toml
+            package.json
           sparse-checkout-cone-mode: false
       - id: languages
         name: Languages
         run: |
           matrix='[{"language": "actions", "build-mode": "none"}]'
+          if [ -f package.json ]; then
+            matrix="$(jq -c '[{"language": "javascript-typescript", "build-mode": "none"}] + .' <<< "$matrix")"
+          fi
           if [ -f pyproject.toml ]; then
             matrix="$(jq -c '[{"language": "python", "build-mode": "none"}] + .' <<< "$matrix")"
           fi

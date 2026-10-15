@@ -15,8 +15,9 @@ permissions: {}
 
 jobs:
   # The full references, pinned: zizmor asks for the self-repository syntax
-  # ($/), which actionlint 1.7.12 rejects, and flags ./ as unpinned. Bump them
-  # with the organization's rulesets.
+  # ($/), which actionlint 1.7.12 rejects, and flags ./ as unpinned. Bumped
+  # by hand to a release's commit, so they trail the latest release: a pull
+  # request cannot pin the tag its own merge creates.
   zizmor:
     permissions:
       contents: read

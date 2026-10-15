@@ -1,0 +1,249 @@
+# Releases this repository: a run on main that finds a feat, a fix or a
+# breaking change not yet released publishes tag vX.Y.Z and a GitHub release
+# at main's head, with notes grouped by kind (.goreleaser.yaml). One that finds
+# only docs, ci, chore or other types releases nothing.
+#
+# A run starts on each push to main, so each merge releases, and by hand
+# ("Run workflow" on main, or gh workflow run release.yml), which releases
+# everything merged since the last release. A repository that releases only by
+# hand drops the push trigger. A run started on another branch publishes
+# nothing.
+#
+# The version comes from svu, from the latest published release, never from
+# a tag alone: a breaking change ("!" after the type in the pull request's
+# title) bumps the major, feat the minor, fix the patch, and while the major
+# is 0 a breaking change bumps the minor. With no release yet, the version is
+# v0.1.0.
+#
+# On a pull request, the version job builds the squash commit its merge would
+# make, from the pull request's title and description, and writes the version
+# and the notes that merge would release to the job summary. Nothing is
+# published, and no token beyond the read-only one is used.
+#
+# Runs on main go one at a time. A run waiting behind another is replaced by
+# a newer one and shows as cancelled, and a run whose commit is no longer
+# main's head exits without publishing: the next release carries its change.
+#
+# Only the publish job writes, with the token of the release GitHub App, the
+# only actor the tag ruleset lets create a v* tag. Its client ID is the
+# RELEASE_APP_CLIENT_ID variable of the release environment, which
+# thatsnotmynameio/admin declares, and its private key the
+# RELEASE_APP_PRIVATE_KEY secret of that environment. Without them the job
+# fails before anything is published.
+#
+# A published release and its tag are final: a run that fails after
+# publishing leaves that version as it is, and a fix ships as the next
+# version. A run that fails before publishing is started again, or left for
+# the next run. When the version's tag already exists without a release,
+# the run fails and publishes nothing: an owner deletes the stray tag after a
+# pull request to admin's .github/repos/github-actions.yml lifts the tag
+# ruleset's deletion rule (a change made by hand would be undone at the next
+# sync), then starts the run again. A tag that has a release is never
+# deleted: its version is burned for good.
+name: release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+permissions: {}
+
+# Runs on main, pushed or started by hand, share one group and never cancel a
+# running release; each pull request has its own group and cancels its own
+# older previews.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('release-pr-{0}', github.event.pull_request.number) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # svu reads the commits since the base, and the base's tag
+          persist-credentials: false
+      # The commit a squash merge would make: the merge's tree on the base
+      # branch, titled after the pull request with its description as the
+      # body, as admin's settings make GitHub squash this repository's pull
+      # requests.
+      - name: Squash commit of the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GIT_AUTHOR_NAME: release preview
+          GIT_AUTHOR_EMAIL: noreply@github.com
+          GIT_COMMITTER_NAME: release preview
+          GIT_COMMITTER_EMAIL: noreply@github.com
+        run: |
+          message="$RUNNER_TEMP/squash-message"
+          printf '%s (#%s)\n\n%s\n' "$PR_TITLE" "$PR_NUMBER" "$PR_BODY" > "$message"
+          squash="$(git commit-tree 'HEAD^{tree}' -p 'HEAD^1' -F "$message")"
+          git checkout -q --detach "$squash"
+      # The official release binary, checked against its published sha256.
+      - name: Install svu
+        env:
+          VERSION: 3.4.1
+          SHA256: 7ee8c91998c15109130638dc661a912d5f426e2f8642f6f6c04e6502be920770
+        run: |
+          archive="$RUNNER_TEMP/svu.tar.gz"
+          curl -fsSLo "$archive" "https://github.com/caarlos0/svu/releases/download/v${VERSION}/svu_${VERSION}_linux_amd64.tar.gz"
+          echo "${SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" svu
+      # The base is the highest vX.Y.Z among the published releases, so a tag
+      # without a release, a release on another tag or the "latest" flag never
+      # sets the version. svu then reads only the commits since the base: the
+      # exact pattern hides every other tag from it. A failed lookup fails the
+      # run, never reads as "no release yet".
+      - id: version
+        name: Version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          tags="$(gh api --paginate "repos/$REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft | not) | .tag_name')"
+          base="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)"
+          if [ -z "$base" ]; then
+            version=v0.1.0
+          else
+            version="$("$RUNNER_TEMP/svu" next --tag.pattern "$base" --tag.prefix v --v0)"
+          fi
+          release=true
+          if [ "$version" = "$base" ]; then
+            echo "::notice::Nothing to release since $base."
+            release=false
+          elif [ "$EVENT" != pull_request ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::notice::Started on $GITHUB_REF: only main is released."
+            release=false
+          elif [ "$EVENT" != pull_request ]; then
+            head="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            if [ "$head" != "$GITHUB_SHA" ]; then
+              echo "::notice::main moved on to $head: its run releases this commit's change."
+              release=false
+            fi
+          fi
+          echo "base=${base:-none} version=$version release=$release"
+          {
+            echo "base=$base"
+            echo "version=$version"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+      # The preview: GoReleaser's release with publishing skipped renders the
+      # notes the merge would publish. GoReleaser needs go on the PATH even
+      # with nothing to build.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: github.event_name == 'pull_request' && steps.version.outputs.release == 'true'
+        with:
+          go-version: stable
+          cache: false
+      - name: Tag the squash commit locally
+        if: github.event_name == 'pull_request' && steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: git tag "$VERSION"
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        if: github.event_name == 'pull_request' && steps.version.outputs.release == 'true'
+        with:
+          distribution: goreleaser
+          version: v2.18.2
+          args: release --clean --skip=publish
+        env:
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.version }}
+          GORELEASER_PREVIOUS_TAG: ${{ steps.version.outputs.base }}
+      - name: Summary
+        if: github.event_name == 'pull_request'
+        env:
+          RELEASE: ${{ steps.version.outputs.release }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BASE: ${{ steps.version.outputs.base }}
+        run: |
+          {
+            if [ "$RELEASE" = true ]; then
+              echo "## Merging this pull request releases $VERSION"
+              echo
+              echo "Since ${BASE:-the first commit}."
+              echo
+              cat dist/CHANGELOG.md
+            else
+              echo "## Merging this pull request releases nothing"
+              echo
+              echo "Nothing to release since $BASE."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: publish
+    needs: version
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      # The only write-capable token: this repository's contents, revoked when
+      # the job ends.
+      - id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # GoReleaser's notes read the commits since the base
+          persist-credentials: false
+      # No cache: GoReleaser needs go on the PATH even with nothing to build.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      # Again right before publishing: a merge may have landed while this run
+      # waited.
+      - id: head
+        name: Still main's head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          head="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main moved on to $head: its run releases this commit's change."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Local only: GoReleaser reads the version from it, and GitHub creates
+      # the tag at this commit when the release is published. Fails when the
+      # tag exists: the checkout fetched every tag.
+      - name: Tag the release locally
+        if: steps.head.outputs.current == 'true'
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: git tag "$VERSION"
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        if: steps.head.outputs.current == 'true'
+        with:
+          distribution: goreleaser
+          version: v2.18.2
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GORELEASER_CURRENT_TAG: ${{ needs.version.outputs.version }}
+          GORELEASER_PREVIOUS_TAG: ${{ needs.version.outputs.base }}

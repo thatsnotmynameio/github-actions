@@ -17,7 +17,7 @@
 #         contents: write
 #         id-token: write
 #         attestations: write
-#       uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # main
+#       uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # vX.Y.Z
 #
 # The run fails when its tag already exists, or when GoReleaser finds the tag
 # is not semantic. GoReleaser (the repository's .goreleaser.yaml) then builds
@@ -30,9 +30,9 @@
 #     --signer-workflow thatsnotmynameio/github-actions/.github/workflows/go-release.yml \
 #     --source-ref refs/heads/main
 #
-# A run that fails before GoReleaser publishes is started again. One that
-# fails after it, the attestation included, leaves a published release and
-# its tag: delete both, then start again.
+# A run that fails before GoReleaser publishes is started again. A published
+# release is final: one that fails after it, the attestation included, leaves
+# that version as it is, and the fix ships as the next version.
 name: go release
 
 on:

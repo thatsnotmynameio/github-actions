@@ -2,6 +2,29 @@
 
 Shared workflows and actions of thatsnotmynameio's repositories, and the checks the organization's rulesets require.
 
+## Versions
+
+Each merge to `main` that brings a `feat`, a `fix` or a breaking change publishes a release, `vX.Y.Z`, whose notes group the changes since the previous release as breaking changes, features and fixes. A merge that brings only `docs`, `ci`, `chore` or another type releases nothing: its change ships with the next release. The first release is `v0.1.0`. `.github/workflows/release.yml` cuts them.
+
+A caller pins a release's commit, with its tag in the comment:
+
+```yaml
+uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@<sha> # vX.Y.Z
+```
+
+`<sha>` is the commit of the tag (`git rev-parse 'vX.Y.Z^{commit}'`). Dependabot's `github-actions` ecosystem then proposes each newer release, with its notes. A published release and its tag never move and are never deleted: a release that went wrong is followed by a fixed one.
+
+A pull request's title becomes its squash commit's title, and decides the version:
+
+- A breaking change, marked with `!` after the type (`feat!: …`, `fix!: …`), bumps the major. While the major is 0, it bumps the minor instead: leaving `0.x` is a deliberate change of its own.
+- `feat` bumps the minor, `fix` the patch.
+
+A change is breaking only when a caller must change something to keep working: a new required input, secret or permission; a renamed or removed workflow, job or check; or a configuration file whose format changes. A stricter check that starts failing code that used to pass is a `feat`. The description becomes the squash commit's body and is read too: it never holds a `BREAKING CHANGE:` line unless the title is marked with `!`.
+
+A revert of a change that was released is titled `fix: revert <the reverted title, without its type>`, so it ships as a release. `revert: …` is only for a change that released nothing.
+
+Each pull request's `release / version` check writes to its summary the version its merge would release, and the notes.
+
 ## Checks required by the organization
 
 The organization's rulesets run these workflows on the pull requests of the repositories they target, pinned by SHA. A repository needs no file of its own, and a pull request cannot change or skip them. Their checks carry the `tnmn.io:` prefix, so they never share a name with a repository's own checks.
@@ -38,7 +61,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@<sha> # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/zizmor.yml@<sha> # vX.Y.Z
 ```
 
 A private repository without GitHub Code Security has no code scanning: there the findings only show in the job's log, the check never fails on them, and the repository needs no file.
@@ -63,7 +86,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 ```
 
 Its checks are `codeql / codeql (go)`, `codeql / codeql (python)` and `codeql / codeql (actions)`, for a caller job named `codeql`, and the repository's ruleset requires them. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
@@ -108,7 +131,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: thatsnotmynameio/github-actions/.github/workflows/go.yml@<sha> # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/go.yml@<sha> # vX.Y.Z
 ```
 
 ### Releases
@@ -132,7 +155,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/go-release.yml@<sha> # vX.Y.Z
 ```
 
 The attestations are signed by this repository's workflow, so a release is verified with:
@@ -184,7 +207,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: thatsnotmynameio/github-actions/.github/workflows/python.yml@<sha> # main
+    uses: thatsnotmynameio/github-actions/.github/workflows/python.yml@<sha> # vX.Y.Z
     # For Trunk Flaky Tests (below): main's results go to Trunk too.
     secrets:
       TRUNK_API_TOKEN: ${{ secrets.TRUNK_API_TOKEN }}

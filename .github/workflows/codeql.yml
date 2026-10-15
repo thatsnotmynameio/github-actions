@@ -11,7 +11,7 @@
 #       permissions:
 #         contents: read
 #         security-events: write
-#       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # main
+#       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 #
 # Its checks are "<caller job> / codeql (go)", "<caller job> / codeql
 # (python)" and "<caller job> / codeql (actions)". Code scanning tells

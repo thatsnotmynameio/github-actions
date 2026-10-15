@@ -37,10 +37,11 @@ The organization's rulesets run these workflows on the pull requests of the repo
 | `.github/workflows/dependency-review.yml` | `tnmn.io: dependency-review` | the dependencies a pull request adds: a license off the organization's allowlist, except in the packages the workflow exempts, or a known vulnerability, fails it. A repository can exempt an advisory, not a package's license. Public repositories and private ones with `tier: private-licensed` only |
 | `.github/workflows/go.yml` | `tnmn.io: go` | a Go module's checks on Linux and macOS: tidy `go.mod`, gofmt, vet, golangci-lint, tests with the race detector, the coverage floor and govulncheck; then a snapshot of the GoReleaser build. Go repositories only |
 | `.github/workflows/python.yml` | `tnmn.io: python` | a Python project's checks on Linux: a current `uv.lock`, ruff's formatting and lint, mypy's type check, the tests with coverage and the coverage floor; then the build of its packages and its image. Python repositories only |
+| `.github/workflows/typescript.yml` | `tnmn.io: typescript` | a TypeScript project's checks on Linux: an install under the organization's pnpm policy, oxfmt's formatting, the type check, oxlint, the production imports with knip, the Vitest tests with coverage and the coverage floor; then its build and its image. TypeScript repositories only |
 
 A ruleset runs them only on `pull_request` and `merge_group`, and ignores their triggers' filters. GitHub does not allow CodeQL's `init` and `analyze` actions in a workflow a ruleset requires, so each repository calls CodeQL's workflow from its own workflows (see [CodeQL](#codeql)).
 
-Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's advisory exceptions (`allow-ghsas`) in `.github/dependency-review.yml`, for Go `.github/go.yml`, `.golangci.yml`, and for Python `.github/python.yml`, `ruff.toml`, `mypy.ini`) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
+Each tool's configuration (`.github/actionlint.yaml`, `.github/zizmor.yml` or `zizmor.yml`, `.grype.yaml`, dependency review's advisory exceptions (`allow-ghsas`) in `.github/dependency-review.yml`, for Go `.github/go.yml`, `.golangci.yml`, for Python `.github/python.yml`, `ruff.toml`, `mypy.ini`, and for TypeScript `.github/typescript.yml`, the exceptions in `pnpm-workspace.yaml`, `.oxlintrc.json`, `.eslintignore`, `.oxfmtrc.json`, `.prettierignore`, `knip.json` and the root `tsconfig.json`'s file selection and strictness) comes from the pull request's base commit, never from the pull request itself: a pull request cannot turn a rule off for itself. A change to it applies once it merges.
 
 zizmor honors no `# zizmor: ignore` comment and no `ignore` list in its configuration, which a pull request could use to hide its own finding: a rule turned off with `disable: true` in the configuration on `main` is the only way to silence zizmor in a repository. An exception to a single finding is a dismissal of its code scanning alert, which an organization owner or security manager approves.
 
@@ -68,7 +69,7 @@ A private repository without GitHub Code Security has no code scanning: there th
 
 ## CodeQL
 
-`.github/workflows/codeql.yml` runs CodeQL's advanced setup with the `security-extended` suite. It analyzes the Go module, test files included, when the repository has `go.mod`, the Python project when it has `pyproject.toml`, and the workflows always. No ruleset can require it, so a repository calls it from its own workflow, on every pull request, on each push to `main` and daily:
+`.github/workflows/codeql.yml` runs CodeQL's advanced setup with the `security-extended` suite. It analyzes the Go module, test files included, when the repository has `go.mod`, the Python project when it has `pyproject.toml`, the JavaScript and TypeScript project when it has `package.json`, and the workflows always. No ruleset can require it, so a repository calls it from its own workflow, on every pull request, on each push to `main` and daily:
 
 ```yaml
 # .github/workflows/security.yml
@@ -89,7 +90,7 @@ jobs:
     uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 ```
 
-Its checks are `codeql / codeql (go)`, `codeql / codeql (python)` and `codeql / codeql (actions)`, for a caller job named `codeql`, and the repository's ruleset requires them. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
+Its checks are `codeql / codeql (go)`, `codeql / codeql (python)`, `codeql / codeql (javascript-typescript)` and `codeql / codeql (actions)`, for a caller job named `codeql`, and the repository's ruleset requires them. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
 
 ## Go
 
@@ -218,3 +219,92 @@ jobs:
 With `trunk`, the tests run in a job of their own for each collection (`tnmn.io: python (test <collection>)`), pytest with that collection's arguments: the repository decides how its tests split, by directory, marker or anything pytest selects, and that no test lands in two collections or in none. A collection whose arguments select no test passes. Each job's JUnit report then goes to its collection through Trunk's uploader (`trunk-io/analytics-uploader`), in a job of its own (`tnmn.io: python (trunk <collection>)`): the only job that holds Trunk's token, and it runs none of the pull request's code. Without `trunk`, the tests run in one job (`tnmn.io: python (test)`) and nothing goes to Trunk.
 
 The collections are created in Trunk's app, which holds their monitors, quarantining and ticketing. The organization holds Trunk's token in the `TRUNK_API_TOKEN` secret and its slug in the `TRUNK_ORG_URL_SLUG` variable. Without them (on a Dependabot or a fork's pull request, for instance), nothing is sent, and a failed upload never fails the check.
+
+## TypeScript
+
+A TypeScript repository's pull requests get `tnmn.io: typescript`. A project is one package at the repository root, with `package.json`, `pnpm-lock.yaml` and `tsconfig.json`: the check fails without the last two, and fails when a pull request removes `package.json` from a project. What the pull request builds and tests is its own (`package.json`, `pnpm-lock.yaml`, the code, the `Dockerfile`); the settings that could turn a check off come from the base commit:
+
+- `.oxlintrc.json`: oxlint's configuration, with oxlint's built-in rules only. A base whose configuration declares `jsPlugins` or `extends`, or leaves the `typescript` plugin out of `plugins`, fails, and so does one kept in code (`oxlint.config.ts`), which would run in the job. `.eslintignore` lists the files oxlint leaves out.
+- `.oxfmtrc.json`: oxfmt's configuration. `.prettierignore` lists the files oxfmt leaves out.
+- `knip.json`: knip's configuration. knip never reads `package.json`'s `knip` field here, since the pull request owns that file.
+- `tsconfig.json`, at the root: the files it selects and the stricter checks it turns on (below).
+- `pnpm-workspace.yaml`: the exceptions to pnpm's policy (below).
+- `.github/typescript.yml`: the coverage floor and its provider, Trunk's test collections, and the dependencies that come from outside the registry:
+
+```yaml
+# The coverage floor: the least total coverage, in percent, of the lines the
+# tests cover. None by default.
+coverage: 90
+# The coverage provider, v8 or istanbul (v8 by default). The project installs
+# it (@vitest/coverage-v8 or @vitest/coverage-istanbul).
+coverage-provider: v8
+# Trunk Flaky Tests' test collections, by their 8-character IDs, each with the
+# vitest arguments that pick its tests (all of them without any). None by
+# default.
+trunk:
+  - collection: AbC12345
+    vitest: [test/worker]
+  - collection: XyZ98765
+    vitest: [--exclude=test/worker/**]
+# The dependencies pnpm-lock.yaml may resolve outside the registry, each by its
+# exact source: a git repository at one commit, or a tarball (a URL, or a
+# committed file:) with its integrity. None by default.
+exotic-dependencies:
+  - repo: https://github.com/someone/foo.git
+    commit: 0123456789abcdef0123456789abcdef01234567
+  - tarball: https://codeload.github.com/someone/bar/tar.gz/0123456789abcdef0123456789abcdef01234567
+    integrity: sha512-...
+```
+
+Everything runs on Linux, with the Node of `.node-version` (24 without one). The project's Node version goes in `.node-version`, not in `package.json`'s `devEngines.runtime`, which can leave grype's SBOM empty (anchore/syft#5241).
+
+### The install
+
+pnpm's policy is the workflow's, set in the environment, which wins over the project's `pnpm-workspace.yaml`:
+
+- Every version in `pnpm-lock.yaml` is at least a day old (`minimumReleaseAge: 1440`), and none has weaker trust evidence than the versions published before it (`trustPolicy: no-downgrade`). pnpm checks the lockfile's entries again on each install, so a lockfile written under a looser policy fails. Dependabot's pull requests follow the same rule, security updates included: a version younger than a day fails, and passes on a re-run once it is old enough.
+- A dependency's install scripts run only when the base's `allowBuilds` allows its package; any other is skipped with a warning. The lint job's install runs none.
+- No pnpmfile runs, and the pnpm version is the workflow's: the project's `packageManager` or `devEngines.packageManager` neither switches it nor fails the check.
+- The check fails when the pull request's `pnpm-workspace.yaml` declares `configDependencies`, a `pnpmfile` or `dangerouslyAllowAllBuilds: true`, or when it or `.npmrc` sets a registry the base does not.
+- A dependency from a git repository, a tarball URL or a committed tarball (`file:`), direct or not, has no publish time or provenance to check: it fails unless the base's `.github/typescript.yml` lists its exact source under `exotic-dependencies`. The failure gives the entry to add.
+
+The exceptions come from the base's `pnpm-workspace.yaml`, so a pull request that adds one gets it once it merges: `minimumReleaseAgeExclude`, `trustPolicyExclude`, `trustPolicyIgnoreAfter` and `allowBuilds`. A pull request that adds a package to `allowBuilds` installs without running its scripts until that change merges.
+
+### Format, types and lint
+
+oxfmt and oxlint run at the workflow's versions, over every file git tracks, so the pull request's `.gitignore` hides none. oxlint's nested configurations are off, and the pull request's `oxlint-suppressions.json` is deleted. `any` (`typescript/no-explicit-any`) and `@ts-ignore` or `@ts-nocheck` (`typescript/ban-ts-comment`) are errors whatever the configuration says, and a comment that turns either rule off fails the check, as does a disable comment that names no rule, which turns them all off. Other disable comments are the pull request's, as `# noqa` is in Python.
+
+The type check runs the project's own TypeScript, from its lockfile, on each `tsconfig.json` git tracks, a Worker's `test/tsconfig.json` included. Each file keeps the pull request's settings (`paths`, module resolution, `types`) with the strictness imposed over them: `strict` and every option of its family, `noCheck: false`, and the stricter checks the base's root `tsconfig.json` turns on (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noFallthroughCasesInSwitch`, `noImplicitOverride`, `noPropertyAccessFromIndexSignature`, `noUnusedLocals`, `noUnusedParameters`, `noUncheckedSideEffectImports`). At the root, the files checked are those the base selects and those the pull request selects, and the files left out are the base's `exclude`. Its findings are annotations on the pull request's lines.
+
+The project needs TypeScript 7 for oxlint's type-aware rules. Below 7, the check warns, the type check runs with the project's TypeScript, and oxlint runs without its type-aware rules; a pull request cannot lower TypeScript below 7 once the base is at 7.
+
+knip fails the check when production code imports a package declared only in `devDependencies`: a bundle ships it all the same.
+
+### Tests, coverage and build
+
+The tests run with the project's own Vitest; a project without test files passes. Coverage, with the base's provider, measures `src/` when the project has it and the whole project otherwise, test, declaration and configuration files left out, whatever the project's Vitest configuration includes, excludes or names as its provider. The coverage job checks the floor over every test job's data, and fails when there is none: a floor needs tests. A threshold in the project's Vitest configuration plays no part. The build job runs the `build` script when `package.json` has one, and `docker build` when the repository has a `Dockerfile`. Known vulnerabilities in the dependencies are `tnmn.io: grype`'s, which reads `pnpm-lock.yaml`.
+
+oxlint's findings go to code scanning under the category `oxlint`, from a job of their own (`tnmn.io: typescript (code scanning)`): the lint job runs the project's TypeScript and knip loads the project's configuration files, so it holds no write permission. Code scanning compares a pull request with the analysis of `main`, so a TypeScript repository also runs the workflow on each push to `main`:
+
+```yaml
+# .github/workflows/ci.yml
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  typescript:
+    permissions:
+      contents: read
+      security-events: write
+    uses: thatsnotmynameio/github-actions/.github/workflows/typescript.yml@<sha> # vX.Y.Z
+    # For Trunk Flaky Tests: main's results go to Trunk too.
+    secrets:
+      TRUNK_API_TOKEN: ${{ secrets.TRUNK_API_TOKEN }}
+```
+
+With `trunk`, the tests run and go to Trunk as they do for Python (see [Trunk Flaky Tests](#trunk-flaky-tests)), with each collection's `vitest` arguments, in jobs named `tnmn.io: typescript (test <collection>)` and `tnmn.io: typescript (trunk <collection>)`.
+
+The tools the workflow runs (oxlint, tsgolint, oxfmt, knip) are locked in `.github/typescript`, which each job checks out at the workflow's commit and installs under the same policy. Dependabot proposes their new versions as `fix`, so each bump ships as a release.

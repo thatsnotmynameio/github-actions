@@ -110,13 +110,18 @@ while (queue.length > 0) {
   }
   renameSync(path, renamed);
   const generated = { extends: `./${basename(renamed)}`, compilerOptions };
-  // extends does not carry references, which a files: [] configuration
-  // needs to be valid.
-  if (Array.isArray(own.references)) generated.references = own.references;
   if (path === "tsconfig.json") {
     generated.include = [...new Set([...(base ? selection(base) : []), ...selection(own)])];
     generated.exclude = Array.isArray(base?.exclude) ? base.exclude : DEFAULT_EXCLUDE;
   }
+  // extends does not carry references, which a configuration naming no file
+  // (files: [] and no include, as a solution-style tsconfig.json) needs to
+  // be valid. One that names files keeps none: with references, tsc would
+  // require each referenced project to emit, and each is checked on its own
+  // here.
+  const include = generated.include ?? own.include;
+  const namesNone = (Array.isArray(include) ? include.length === 0 : Array.isArray(own.files)) && !(own.files?.length > 0);
+  if (Array.isArray(own.references) && namesNone) generated.references = own.references;
   writeFileSync(path, `${JSON.stringify(generated, null, 2)}\n`);
   console.log(path);
 }

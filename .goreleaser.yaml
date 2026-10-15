@@ -48,8 +48,9 @@ release:
   name_template: "{{ .Tag }}"
   make_latest: true
   # A leftover draft of the same release, from a run that failed after
-  # creating it, is published instead of a second one.
+  # creating it, is published instead of a second one, with this run's notes.
   use_existing_draft: true
+  mode: replace
   # The commit this run built, never whatever main's head is when the release
   # is published: a published release and its tag are final.
   target_commitish: "{{ .FullCommit }}"

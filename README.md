@@ -19,7 +19,7 @@ A pull request's title becomes its squash commit's title, and decides the versio
 - A breaking change, marked with `!` after the type (`feat!: …`, `fix!: …`), bumps the major. While the major is 0, it bumps the minor instead: leaving `0.x` is a deliberate change of its own.
 - `feat` bumps the minor, `fix` the patch.
 
-A change is breaking only when a caller must change something to keep working: a new required input, secret or permission; a renamed or removed workflow, job or check; or a configuration file whose format changes. A stricter check that starts failing code that used to pass is a `feat`. The description becomes the squash commit's body and is read too: it never holds a `BREAKING CHANGE:` line unless the title is marked with `!`.
+A change is breaking only when a caller must change something to keep working: a new required input, secret or permission; a renamed or removed workflow, job or check; or a configuration file whose format changes. A stricter check that starts failing code that used to pass is a `feat`. The description becomes the squash commit's body and is read too: `BREAKING CHANGE:` anywhere in it makes a breaking change, so it never appears there unless the title is marked with `!`, which is what puts the change under breaking changes in the notes.
 
 A revert of a change that was released is titled `fix: revert <the reverted title, without its type>`, so it ships as a release. `revert: …` is only for a change that released nothing.
 

@@ -4,7 +4,7 @@ Shared workflows and actions of thatsnotmynameio's repositories, and the checks 
 
 ## Versions
 
-Each merge to `main` that brings a `feat`, a `fix` or a breaking change publishes a release, `vX.Y.Z`, whose notes group the changes since the previous release as breaking changes, features and fixes. A merge that brings only `docs`, `ci`, `chore` or another type releases nothing: its change ships with the next release. The first release is `v0.1.0`. `.github/workflows/release.yml` cuts them.
+Each merge to `main` that brings a `feat`, a `fix` or a breaking change publishes a release, `vX.Y.Z`, whose notes group the changes since the previous release as breaking changes, features and fixes. A merge that brings only `docs`, `ci`, `chore` or another type releases nothing: its change ships with the next release. The first release is `v0.1.0`. `.github/workflows/release.yml` cuts them. It can also be started by hand on `main` ("Run workflow", or `gh workflow run release.yml`), which releases everything merged since the last release.
 
 A caller pins a release's commit, with its tag in the comment:
 

@@ -1,7 +1,13 @@
-# Releases this repository: each push to main that brings a feat, a fix or a
+# Releases this repository: a run on main that finds a feat, a fix or a
 # breaking change not yet released publishes tag vX.Y.Z and a GitHub release
-# at the pushed commit, with notes grouped by kind (.goreleaser.yaml). A push
-# that brings only docs, ci, chore or other types releases nothing.
+# at main's head, with notes grouped by kind (.goreleaser.yaml). One that finds
+# only docs, ci, chore or other types releases nothing.
+#
+# A run starts on each push to main, so each merge releases, and by hand
+# ("Run workflow" on main, or gh workflow run release.yml), which releases
+# everything merged since the last release. A repository that releases only by
+# hand drops the push trigger. A run started on another branch publishes
+# nothing.
 #
 # The version comes from svu, from the latest published release, never from
 # a tag alone: a breaking change ("!" after the type in the pull request's
@@ -14,8 +20,8 @@
 # and the notes that merge would release to the job summary. Nothing is
 # published, and no token beyond the read-only one is used.
 #
-# Pushes to main run one at a time. A run waiting behind another is replaced
-# by a newer push and shows as cancelled, and a run whose commit is no longer
+# Runs on main go one at a time. A run waiting behind another is replaced by
+# a newer one and shows as cancelled, and a run whose commit is no longer
 # main's head exits without publishing: the next release carries its change.
 #
 # Only the publish job writes, with the token of the release GitHub App, the
@@ -28,7 +34,7 @@
 # A published release and its tag are final: a run that fails after
 # publishing leaves that version as it is, and a fix ships as the next
 # version. A run that fails before publishing is started again, or left for
-# the next push. When the version's tag already exists without a release,
+# the next run. When the version's tag already exists without a release,
 # the run fails and publishes nothing: an owner deletes the stray tag after a
 # pull request to admin's .github/repos/github-actions.yml lifts the tag
 # ruleset's deletion rule (a change made by hand would be undone at the next
@@ -41,13 +47,15 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
 
 permissions: {}
 
-# Pushes to main share one group and never cancel a running release; each
-# pull request has its own group and cancels its own older previews.
+# Runs on main, pushed or started by hand, share one group and never cancel a
+# running release; each pull request has its own group and cancels its own
+# older previews.
 concurrency:
-  group: ${{ github.event_name == 'push' && 'release' || format('release-pr-{0}', github.event.pull_request.number) }}
+  group: ${{ github.event_name == 'pull_request' && format('release-pr-{0}', github.event.pull_request.number) || 'release' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -119,7 +127,10 @@ jobs:
           if [ "$version" = "$base" ]; then
             echo "::notice::Nothing to release since $base."
             release=false
-          elif [ "$EVENT" = push ]; then
+          elif [ "$EVENT" != pull_request ] && [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::notice::Started on $GITHUB_REF: only main is released."
+            release=false
+          elif [ "$EVENT" != pull_request ]; then
             head="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq .object.sha)"
             if [ "$head" != "$GITHUB_SHA" ]; then
               echo "::notice::main moved on to $head: its run releases this commit's change."
@@ -178,7 +189,7 @@ jobs:
   publish:
     name: publish
     needs: version
-    if: github.event_name == 'push' && needs.version.outputs.release == 'true'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
@@ -203,7 +214,7 @@ jobs:
         with:
           go-version: stable
           cache: false
-      # Again right before publishing: a push may have landed while this run
+      # Again right before publishing: a merge may have landed while this run
       # waited.
       - id: head
         name: Still main's head

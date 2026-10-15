@@ -307,4 +307,4 @@ jobs:
 
 With `trunk`, the tests run and go to Trunk as they do for Python (see [Trunk Flaky Tests](#trunk-flaky-tests)), with each collection's `vitest` arguments, in jobs named `tnmn.io: typescript (test <collection>)` and `tnmn.io: typescript (trunk <collection>)`.
 
-The tools the workflow runs (oxlint, tsgolint, oxfmt, knip) are locked in `.github/typescript`, which each job checks out at the workflow's commit and installs under the same policy. Dependabot proposes their new versions as `fix`, so each bump ships as a release.
+The tools the workflow runs (oxlint, tsgolint, oxfmt, knip) are at the versions in its `env`, as Python's are, and each job installs them under the same policy.

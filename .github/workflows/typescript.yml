@@ -27,8 +27,8 @@
 # dependency scripts the base allows and no others, no pnpmfile, and this
 # workflow's pnpm whatever the project pins. A dependency from a git
 # repository or a tarball installs only when the base lists it.
-# The tools this workflow runs are locked in .github/typescript at this
-# workflow's commit, which each job checks out.
+# The tools this workflow runs are at the versions in env, which each job
+# installs under the same policy.
 # Known vulnerabilities in the dependencies are grype's ("tnmn.io: grype"),
 # which reads pnpm-lock.yaml.
 # The tests' results go to Trunk Flaky Tests when .github/typescript.yml
@@ -61,9 +61,16 @@ env:
   PNPM_VERSION: 12.10.1
   NODE_VERSION: 24
   TRUNK_CLI_VERSION: 0.16.0
+  # oxlint's type-aware rules need the oxlint-tsgolint its release names.
+  OXLINT_VERSION: 1.87.0
+  OXLINT_TSGOLINT_VERSION: 7.0.2003
+  OXFMT_VERSION: 0.72.0
+  KNIP_VERSION: 6.40.0
+  JSONC_PARSER_VERSION: 3.3.1
+  ISTANBUL_LIB_COVERAGE_VERSION: 3.2.2
   # pnpm's policy, the same in every repository. Each installing job adds the
   # store and cache under $RUNNER_TEMP and the base's exceptions, then checks
-  # that pnpm took every value (.github/typescript/policy.sh).
+  # that pnpm took every value.
   pnpm_config_minimum_release_age: 1440
   pnpm_config_minimum_release_age_strict: true
   pnpm_config_trust_policy: no-downgrade
@@ -386,37 +393,6 @@ jobs:
             oxfmt.config.*
             knip.*
           sparse-checkout-cone-mode: false
-      # This workflow's repository and commit: the caller's workflow_call, or
-      # the ruleset, runs it from there.
-      - id: workflow
-        name: This workflow's commit
-        env:
-          JOB: ${{ toJSON(job) }}
-        run: |
-          repository="$(jq -r '.workflow_repository // ""' <<< "$JOB")"
-          sha="$(jq -r '.workflow_sha // ""' <<< "$JOB")"
-          if [ -z "$repository" ] || [ -z "$sha" ]; then
-            echo "::error::No workflow repository or commit in the job context."
-            exit 1
-          fi
-          {
-            echo "repository=$repository"
-            echo "sha=$sha"
-          } >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.workflow.outputs.repository }}
-          ref: ${{ steps.workflow.outputs.sha }}
-          path: .tnmn-typescript
-          persist-credentials: false
-          sparse-checkout: |
-            .github/typescript
-          sparse-checkout-cone-mode: false
-      # Out of the project's tree, before anything reads it.
-      - name: This workflow's tools
-        run: |
-          mv .tnmn-typescript/.github/typescript "$RUNNER_TEMP/tnmn-typescript"
-          rm -rf .tnmn-typescript
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ${{ hashFiles('.node-version') != '' && '.node-version' || '' }}
@@ -428,12 +404,29 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
           package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
       - name: pnpm policy
         env:
           POLICY: ${{ needs.setup.outputs.policy }}
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" env
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      # At env's versions, out of the project's tree.
       - name: Install the tools
-        run: pnpm install --dir "$RUNNER_TEMP/tnmn-typescript" --frozen-lockfile --ignore-pnpmfile --ignore-scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          jq -n '{private: true, dependencies: {
+              oxlint: env.OXLINT_VERSION, "oxlint-tsgolint": env.OXLINT_TSGOLINT_VERSION, oxfmt: env.OXFMT_VERSION,
+              knip: env.KNIP_VERSION, "jsonc-parser": env.JSONC_PARSER_VERSION}}' > "$RUNNER_TEMP/tools/package.json"
+          pnpm install --dir "$RUNNER_TEMP/tools" --no-frozen-lockfile --ignore-pnpmfile --ignore-scripts
       # Every file a tool could find is deleted from the pull request's tree,
       # and the base's file takes its path, so the paths inside it resolve as
       # they do locally; each tool gets its configuration explicitly, an
@@ -446,7 +439,6 @@ jobs:
       - id: base
         name: Configuration from the base
         run: |
-          tools="$RUNNER_TEMP/tnmn-typescript"
           base=.base-config
           status=0
           for f in "$base"/oxlint.config.* "$base"/oxfmt.config.* "$base"/knip.*; do
@@ -467,7 +459,23 @@ jobs:
           if [ -f "$base/.oxlintrc.json" ]; then
             cp "$base/.oxlintrc.json" .oxlintrc.json
             oxlint=.oxlintrc.json
-            config="$(node "$tools/jsonc.mjs" .oxlintrc.json)"
+            # JSON with comments and trailing commas, as oxlint reads it.
+            config="$(node --input-type=module - .oxlintrc.json <<'EOF'
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const { parse, printParseErrorCode } = require("jsonc-parser");
+
+          const [path] = process.argv.slice(2);
+          const errors = [];
+          const value = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+          if (errors.length > 0) {
+            console.error(`${path}: not valid JSON (${printParseErrorCode(errors[0].error)})`);
+            process.exit(1);
+          }
+          console.log(JSON.stringify(value));
+          EOF
+            )"
             if jq -e 'has("jsPlugins")' <<< "$config" > /dev/null; then
               echo "::error::The base's .oxlintrc.json declares jsPlugins, whose code would come from the pull request's lockfile: oxlint runs its built-in rules only."
               status=1
@@ -538,15 +546,30 @@ jobs:
             mapfile -d '' files < <(git ls-files -z)
           fi
           : > "$RUNNER_TEMP/no-ignore"
-          "$RUNNER_TEMP/tnmn-typescript/node_modules/.bin/oxfmt" --check --disable-nested-config \
+          "$RUNNER_TEMP/tools/node_modules/.bin/oxfmt" --check --disable-nested-config \
             --config="$OXFMT" --ignore-path="$RUNNER_TEMP/no-ignore" --no-error-on-unmatched-pattern "${files[@]}"
       - id: install
         name: pnpm install
         if: ${{ !cancelled() }}
         run: pnpm install --frozen-lockfile --ignore-pnpmfile --ignore-scripts
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
       - name: pnpm policy check
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" check
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
       # The project's own TypeScript, from its lockfile: below 7, the type
       # check runs with it and warns, and oxlint runs without its type-aware
       # rules, which need TypeScript 7; a pull request cannot lower it below
@@ -582,16 +605,138 @@ jobs:
             echo "version=$version"
             echo "type-aware=$type_aware"
           } >> "$GITHUB_OUTPUT"
-      # Each tsconfig.json git tracks, with the strictness on and, at the
-      # root, the base's files added (.github/typescript/tsconfig.mjs), by
-      # the project's tsc. Each finding becomes an annotation on the pull
-      # request's lines.
+      # Each tsconfig.json git tracks, and each configuration one of them
+      # reaches through references (as a solution-style tsconfig.json does),
+      # moves to <name>.pull-request.json next to it, and a generated file at
+      # its path extends it and turns the strictness on, so the pull request
+      # keeps its paths, module resolution and types but cannot turn a check
+      # off. At the root, the generated file also checks the base's files:
+      # its include is the union of the base's and the pull request's, and
+      # its exclude the base's. The project's tsc checks each generated file,
+      # and each finding becomes an annotation on the pull request's lines.
       - name: tsc
         if: ${{ !cancelled() && steps.version.outcome == 'success' }}
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          node "$RUNNER_TEMP/tnmn-typescript/tsconfig.mjs" "$RUNNER_TEMP/base-tsconfig.json" "$VERSION" > "$RUNNER_TEMP/tsconfigs"
+          node --input-type=module - "$RUNNER_TEMP/base-tsconfig.json" "$VERSION" > "$RUNNER_TEMP/tsconfigs" <<'EOF'
+          import { execFileSync } from "node:child_process";
+          import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+          import { basename, dirname, join, normalize } from "node:path";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const { parse, printParseErrorCode } = require("jsonc-parser");
+
+          const [basePath, version] = process.argv.slice(2);
+          const [major, minor] = version.split(".").map(Number);
+          const atLeast = (m, n) => major > m || (major === m && minor >= n);
+
+          // TypeScript's default when a file has no exclude.
+          const DEFAULT_EXCLUDE = ["node_modules", "bower_components", "jspm_packages"];
+          // The strict family: strict: true sets them, but an explicit false in the
+          // pull request's file would win over it. Each with the version that added it.
+          const STRICT_FAMILY = [
+            ["noImplicitAny", 0, 0],
+            ["noImplicitThis", 0, 0],
+            ["alwaysStrict", 0, 0],
+            ["strictNullChecks", 0, 0],
+            ["strictFunctionTypes", 0, 0],
+            ["strictBindCallApply", 0, 0],
+            ["strictPropertyInitialization", 0, 0],
+            ["useUnknownInCatchVariables", 4, 4],
+            ["strictBuiltinIteratorReturn", 5, 6],
+          ];
+          // Stricter checks outside the family, imposed when the base's root
+          // tsconfig.json sets them to true.
+          const BASE_FLAGS = [
+            ["noUncheckedIndexedAccess", 4, 1],
+            ["exactOptionalPropertyTypes", 4, 4],
+            ["noImplicitReturns", 0, 0],
+            ["noFallthroughCasesInSwitch", 0, 0],
+            ["noImplicitOverride", 4, 3],
+            ["noPropertyAccessFromIndexSignature", 4, 2],
+            ["noUnusedLocals", 0, 0],
+            ["noUnusedParameters", 0, 0],
+            ["noUncheckedSideEffectImports", 5, 6],
+          ];
+
+          function read(path) {
+            const errors = [];
+            const value = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+            if (errors.length > 0 || value === null || typeof value !== "object" || Array.isArray(value)) {
+              const reason = errors.length > 0 ? printParseErrorCode(errors[0].error) : "not an object";
+              throw new Error(`${path}: not a valid tsconfig.json (${reason})`);
+            }
+            return value;
+          }
+
+          // The files a configuration selects, as written in it, extends left aside:
+          // its include, none when it lists files only, every file when it has neither.
+          function selection(config) {
+            if (Array.isArray(config.include)) return config.include;
+            if (Array.isArray(config.files)) return [];
+            return ["**/*"];
+          }
+
+          const base = existsSync(basePath) ? read(basePath) : null;
+          const compilerOptions = { strict: true, noEmit: true, emitDeclarationOnly: false };
+          if (atLeast(5, 5)) compilerOptions.noCheck = false;
+          for (const [name, m, n] of STRICT_FAMILY) {
+            if (atLeast(m, n)) compilerOptions[name] = true;
+          }
+          for (const [name, m, n] of BASE_FLAGS) {
+            if (atLeast(m, n) && base?.compilerOptions?.[name] === true) compilerOptions[name] = true;
+          }
+
+          const tracked = execFileSync("git", ["ls-files", "-z", "--", "tsconfig.json", "*/tsconfig.json"], {
+            encoding: "utf8",
+          })
+            .split("\0")
+            .filter(Boolean);
+
+          // A reference names a configuration file, or a directory with a
+          // tsconfig.json; one outside the repository is not the pull request's to
+          // check.
+          function referenced(path, config) {
+            if (!Array.isArray(config.references)) return [];
+            return config.references
+              .map((reference) => (typeof reference?.path === "string" ? normalize(join(dirname(path), reference.path)) : null))
+              .filter((target) => target !== null && !target.startsWith(".."))
+              .map((target) => (target.endsWith(".json") ? target : join(target, "tsconfig.json")))
+              .filter((target) => existsSync(target));
+          }
+
+          const queue = [...tracked];
+          const seen = new Set(queue);
+          while (queue.length > 0) {
+            const path = queue.shift();
+            const renamed = join(dirname(path), `${basename(path, ".json")}.pull-request.json`);
+            if (existsSync(renamed)) throw new Error(`${renamed}: the name the check moves ${path} to is taken`);
+            const own = read(path);
+            for (const target of referenced(path, own)) {
+              if (!seen.has(target)) {
+                seen.add(target);
+                queue.push(target);
+              }
+            }
+            renameSync(path, renamed);
+            const generated = { extends: `./${basename(renamed)}`, compilerOptions };
+            if (path === "tsconfig.json") {
+              generated.include = [...new Set([...(base ? selection(base) : []), ...selection(own)])];
+              generated.exclude = Array.isArray(base?.exclude) ? base.exclude : DEFAULT_EXCLUDE;
+            }
+            // extends does not carry references, which a configuration naming no file
+            // (files: [] and no include, as a solution-style tsconfig.json) needs to
+            // be valid. One that names files keeps none: with references, tsc would
+            // require each referenced project to emit, and each is checked on its own
+            // here.
+            const include = generated.include ?? own.include;
+            const namesNone = (Array.isArray(include) ? include.length === 0 : Array.isArray(own.files)) && !(own.files?.length > 0);
+            if (Array.isArray(own.references) && namesNone) generated.references = own.references;
+            writeFileSync(path, `${JSON.stringify(generated, null, 2)}\n`);
+            console.log(path);
+          }
+          EOF
           status=0
           while IFS= read -r config; do
             echo "tsc -p $config"
@@ -626,7 +771,7 @@ jobs:
           ESLINTIGNORE: ${{ steps.base.outputs.eslintignore }}
           TYPE_AWARE: ${{ steps.version.outputs.type-aware }}
         run: |
-          tools="$RUNNER_TEMP/tnmn-typescript/node_modules/.bin"
+          tools="$RUNNER_TEMP/tools/node_modules/.bin"
           export OXLINT_TSGOLINT_PATH="$tools/tsgolint"
           mapfile -d '' files < <(git ls-files -z -- '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs')
           if [ "${#files[@]}" -eq 0 ]; then
@@ -674,7 +819,7 @@ jobs:
         run: |
           jq 'del(.knip)' package.json > "$RUNNER_TEMP/package.json"
           cp "$RUNNER_TEMP/package.json" package.json
-          "$RUNNER_TEMP/tnmn-typescript/node_modules/.bin/knip" --config="$KNIP" --strict --include unlisted \
+          "$RUNNER_TEMP/tools/node_modules/.bin/knip" --config="$KNIP" --strict --include unlisted \
             --no-config-hints --no-progress --reporter github-actions
 
   # Uploads oxlint's findings to code scanning, after a failed lint too, so
@@ -741,34 +886,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - id: workflow
-        name: This workflow's commit
-        env:
-          JOB: ${{ toJSON(job) }}
-        run: |
-          repository="$(jq -r '.workflow_repository // ""' <<< "$JOB")"
-          sha="$(jq -r '.workflow_sha // ""' <<< "$JOB")"
-          if [ -z "$repository" ] || [ -z "$sha" ]; then
-            echo "::error::No workflow repository or commit in the job context."
-            exit 1
-          fi
-          {
-            echo "repository=$repository"
-            echo "sha=$sha"
-          } >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.workflow.outputs.repository }}
-          ref: ${{ steps.workflow.outputs.sha }}
-          path: .tnmn-typescript
-          persist-credentials: false
-          sparse-checkout: |
-            .github/typescript
-          sparse-checkout-cone-mode: false
-      - name: This workflow's tools
-        run: |
-          mv .tnmn-typescript/.github/typescript "$RUNNER_TEMP/tnmn-typescript"
-          rm -rf .tnmn-typescript
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ${{ hashFiles('.node-version') != '' && '.node-version' || '' }}
@@ -778,14 +895,40 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
           package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
       - name: pnpm policy
         env:
           POLICY: ${{ needs.setup.outputs.policy }}
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" env
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
       - name: pnpm install
         run: pnpm install --frozen-lockfile --ignore-pnpmfile
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
       - name: pnpm policy check
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" check
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
       - name: vitest
         env:
           COLLECTION: ${{ matrix.collection }}
@@ -837,7 +980,7 @@ jobs:
           retention-days: 1
 
   # The total of the lines the test jobs covered, merged by this workflow's
-  # istanbul-lib-coverage (.github/typescript/coverage.mjs), when every test
+  # istanbul-lib-coverage, when every test
   # job passed. Without coverage data (no test file, or every test
   # deleted), it fails: a floor needs tests. A threshold in the project's
   # Vitest configuration plays no part. It runs none of the project's code.
@@ -848,34 +991,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - id: workflow
-        name: This workflow's commit
-        env:
-          JOB: ${{ toJSON(job) }}
-        run: |
-          repository="$(jq -r '.workflow_repository // ""' <<< "$JOB")"
-          sha="$(jq -r '.workflow_sha // ""' <<< "$JOB")"
-          if [ -z "$repository" ] || [ -z "$sha" ]; then
-            echo "::error::No workflow repository or commit in the job context."
-            exit 1
-          fi
-          {
-            echo "repository=$repository"
-            echo "sha=$sha"
-          } >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.workflow.outputs.repository }}
-          ref: ${{ steps.workflow.outputs.sha }}
-          path: .tnmn-typescript
-          persist-credentials: false
-          sparse-checkout: |
-            .github/typescript
-          sparse-checkout-cone-mode: false
-      - name: This workflow's tools
-        run: |
-          mv .tnmn-typescript/.github/typescript "$RUNNER_TEMP/tnmn-typescript"
-          rm -rf .tnmn-typescript
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -884,12 +999,27 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
           package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
       - name: pnpm policy
         env:
           POLICY: ${{ needs.setup.outputs.policy }}
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" env
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
+      # At env's version, out of the project's tree.
       - name: Install the tools
-        run: pnpm install --dir "$RUNNER_TEMP/tnmn-typescript" --frozen-lockfile --ignore-pnpmfile --ignore-scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          jq -n '{private: true, dependencies: {"istanbul-lib-coverage": env.ISTANBUL_LIB_COVERAGE_VERSION}}' > "$RUNNER_TEMP/tools/package.json"
+          pnpm install --dir "$RUNNER_TEMP/tools" --no-frozen-lockfile --ignore-pnpmfile --ignore-scripts
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: coverage-*
@@ -899,7 +1029,28 @@ jobs:
           FLOOR: ${{ needs.setup.outputs.coverage }}
         run: |
           mapfile -d '' files < <(find "$RUNNER_TEMP/coverage" -name coverage-final.json -print0 2> /dev/null)
-          node "$RUNNER_TEMP/tnmn-typescript/coverage.mjs" "$FLOOR" "${files[@]}"
+          node --input-type=module - "$FLOOR" "${files[@]}" <<'EOF'
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          const require = createRequire(`${process.env.RUNNER_TEMP}/tools/`);
+          const libCoverage = require("istanbul-lib-coverage");
+
+          const [floor, ...files] = process.argv.slice(2);
+          const map = libCoverage.createCoverageMap({});
+          for (const file of files) map.merge(JSON.parse(readFileSync(file, "utf8")));
+          const lines = map.getCoverageSummary().lines;
+          if (lines.total === 0) {
+            console.log("::error::No coverage data: the tests measured no line.");
+            process.exit(1);
+          }
+          const total = lines.pct;
+          if (total >= Number(floor)) {
+            console.log(`Total coverage: ${total}%, at or above the floor of ${floor}%.`);
+          } else {
+            console.log(`::error::Total coverage ${total}% is below the floor of ${floor}%.`);
+            process.exit(1);
+          }
+          EOF
 
   # Sends each collection's JUnit report to Trunk Flaky Tests, through Trunk's
   # uploader, when the base's .github/typescript.yml names collections. The
@@ -975,37 +1126,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - id: workflow
-        if: needs.setup.outputs.build == 'true'
-        name: This workflow's commit
-        env:
-          JOB: ${{ toJSON(job) }}
-        run: |
-          repository="$(jq -r '.workflow_repository // ""' <<< "$JOB")"
-          sha="$(jq -r '.workflow_sha // ""' <<< "$JOB")"
-          if [ -z "$repository" ] || [ -z "$sha" ]; then
-            echo "::error::No workflow repository or commit in the job context."
-            exit 1
-          fi
-          {
-            echo "repository=$repository"
-            echo "sha=$sha"
-          } >> "$GITHUB_OUTPUT"
-      - if: needs.setup.outputs.build == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ steps.workflow.outputs.repository }}
-          ref: ${{ steps.workflow.outputs.sha }}
-          path: .tnmn-typescript
-          persist-credentials: false
-          sparse-checkout: |
-            .github/typescript
-          sparse-checkout-cone-mode: false
-      - name: This workflow's tools
-        if: needs.setup.outputs.build == 'true'
-        run: |
-          mv .tnmn-typescript/.github/typescript "$RUNNER_TEMP/tnmn-typescript"
-          rm -rf .tnmn-typescript
       - if: needs.setup.outputs.build == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -1017,17 +1137,43 @@ jobs:
         with:
           version: ${{ env.PNPM_VERSION }}
           package_json_file: .tnmn-no-package.json
+      # The store and cache under $RUNNER_TEMP, and the base's exceptions to
+      # pnpm's policy, which the setup job hands over in base64.
       - name: pnpm policy
         if: needs.setup.outputs.build == 'true'
         env:
           POLICY: ${{ needs.setup.outputs.policy }}
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" env
+        run: |
+          exceptions="$(base64 -d <<< "$POLICY")"
+          {
+            echo "pnpm_config_store_dir=$RUNNER_TEMP/pnpm-store"
+            echo "pnpm_config_cache_dir=$RUNNER_TEMP/pnpm-cache"
+            echo "pnpm_config_minimum_release_age_exclude=$(jq -c .minimumReleaseAgeExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_exclude=$(jq -c .trustPolicyExclude <<< "$exceptions")"
+            echo "pnpm_config_trust_policy_ignore_after=$(jq -c .trustPolicyIgnoreAfter <<< "$exceptions")"
+            echo "pnpm_config_allow_builds=$(jq -c .allowBuilds <<< "$exceptions")"
+          } >> "$GITHUB_ENV"
       - name: pnpm install
         if: needs.setup.outputs.build == 'true'
         run: pnpm install --frozen-lockfile --ignore-pnpmfile
+      # Each pnpm_config_* value must be the one pnpm applies: pnpm drops a
+      # malformed or empty value with no error, and the project's
+      # pnpm-workspace.yaml would then apply.
       - name: pnpm policy check
         if: needs.setup.outputs.build == 'true'
-        run: bash "$RUNNER_TEMP/tnmn-typescript/policy.sh" check
+        run: |
+          status=0
+          while IFS= read -r name; do
+            key="${name#pnpm_config_}"
+            key="${key//_/-}"
+            want="$(jq -cS . <<< "${!name}" 2> /dev/null || jq -cn --arg v "${!name}" '$v')"
+            got="$(pnpm config get "$key" --json | jq -cS .)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::pnpm's $key is $got, not $want: the environment's value did not apply."
+              status=1
+            fi
+          done < <(compgen -e | grep '^pnpm_config_' | sort)
+          exit "$status"
       - name: pnpm run build
         if: needs.setup.outputs.build == 'true'
         run: pnpm run build

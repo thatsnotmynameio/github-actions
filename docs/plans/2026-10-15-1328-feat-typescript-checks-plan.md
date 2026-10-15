@@ -16,7 +16,7 @@ execution: code
 - **Means:** a new required workflow, `tnmn.io: typescript` (`.github/workflows/typescript.yml`), built on `python.yml`'s job layout (KTD1), with pnpm's supply-chain policy forced from the environment (KTD3) and every tool configuration taken from the base commit (KTD8). Issue #29.
 - **Product authority:** this plan covers the base TypeScript check only. The checks of a JavaScript action (#30), of a Cloudflare Worker (#31), the npm licenses in dependency review (#32, done in #38), the release (#33) and the ecosystem audit tools (#27) are separate work. The Product Contract wins on behavior; the KTDs win on mechanism.
 - **Execution profile:** workflow YAML and shell, in this repository. No test harness exists here; each unit is proven on a scratch TypeScript repository (Verification Contract).
-- **Stop conditions:** stop and report if `job.workflow_sha` is unavailable to a ruleset-required workflow (KTD2), or if pnpm ignores an environment override that KTD3 relies on and no other route forces it.
+- **Stop conditions:** stop and report if pnpm ignores an environment override that KTD3 relies on and no other route forces it.
 - **Who finishes:** the implementer opens one pull request in this repository, titled `feat: …`. Moving the organization ruleset's pin in thatsnotmynameio/admin is follow-up work.
 - **Open blockers:** none.
 
@@ -165,7 +165,7 @@ The existing stacks set a rule this one must keep. The settings that could turn 
 ### Key Technical Decisions
 
 - KTD1. **`python.yml`'s shape, one file, seven jobs.** `setup`, `typescript` (named `(lint)`), `code-scanning`, `test`, `coverage`, `trunk` and `build`, with the same triggers (`pull_request`, `merge_group`, `workflow_call` with an optional `TRUNK_API_TOKEN`), no `push:` trigger and no concurrency block, and `contents: read` at the top. Unlike `python.yml`, the lint job holds no write permission: it runs the project's `tsc` and knip loads the project's configuration files, so it keeps oxlint's SARIF as an artifact, and `code-scanning`, which holds `security-events: write` and runs none of the project's code, uploads it. Code scanning keys alerts by workflow file, job id and category, so the job id `code-scanning` and the category `oxlint` are fixed from the first release. Governs R1, R10, R19.
-- KTD2. **The workflow's own tools come from a lockfile in this repository.** oxlint, oxlint-tsgolint, oxfmt, knip and the coverage merger are declared in `.github/typescript/package.json` with `.github/typescript/pnpm-lock.yaml`. Each job checks that directory out from `job.workflow_repository` at `job.workflow_sha` and installs it frozen in `$RUNNER_TEMP`, under KTD3's policy. actionlint 1.7.12 does not type those two fields, so a step reads them from `toJSON(job)` in its `env` with jq and hands them to the checkout as outputs. Both oxlint runs set `OXLINT_TSGOLINT_PATH` to this install's `tsgolint`, since oxlint otherwise takes the first `tsgolint` in the project's `node_modules/.bin`. Dependabot updates the directory with pull requests titled `fix`, so each tool bump publishes a release and reaches callers: under the release rules (README `## Versions`), a `chore` or `build` title would release nothing. A bump that makes the check stricter is retitled `feat` by hand. (session-settled: user-approved — chosen over versions pinned in `env` and run through `pnpm dlx`: a version alone pins no integrity, and the tools would skip the release-age and trust rules the projects follow.)
+- KTD2. **The workflow's own tools are at versions in its `env`, as `python.yml`'s are.** `OXLINT_VERSION`, `OXLINT_TSGOLINT_VERSION`, `OXFMT_VERSION`, `KNIP_VERSION`, `JSONC_PARSER_VERSION` and `ISTANBUL_LIB_COVERAGE_VERSION` sit next to `PNPM_VERSION`. Each job that runs a tool installs it by version with `pnpm install` from a `package.json` written in `$RUNNER_TEMP/tools`, under KTD3's policy, so the release age and trust rules apply to its resolution. The scripts the jobs run (the policy steps, the tsconfig generation, the coverage merge, the JSONC read) are inline in the workflow. No job checks this repository out. Both oxlint runs set `OXLINT_TSGOLINT_PATH` to this install's `tsgolint`, since oxlint otherwise takes the first `tsgolint` in the project's `node_modules/.bin`. A version bump is a pull request titled `fix`, or `feat` when it makes the check stricter. (session-settled: user-directed during verification, "Faça igual o Python". It replaced a lockfile in `.github/typescript`, checked out at `job.workflow_sha`, which needed a ruleset run to confirm before merge.)
 - KTD3. **pnpm's policy is forced from the environment.** Top-level `env` sets the `pnpm_config_*` values that cannot change between repositories:
   - release age 1440 minutes, strict;
   - trust policy `no-downgrade`, `trustLockfile` false;
@@ -205,7 +205,7 @@ The job graph, and where each base-owned input enters:
 flowchart TB
   base[(base commit: .github/typescript.yml, pnpm-workspace.yaml, .npmrc, package.json, tsconfig.json, tool configs)]
   head[(pull request head)]
-  tools[(this repository at job.workflow_sha: .github/typescript lockfile)]
+  tools[(registry: the tool versions in env)]
   setup[setup: detect project, R2 and R4 checks, exotic scan, config validation, policy outputs]
   lint[typescript - lint, read-only: install without scripts, oxfmt, oxlint SARIF as artifact, disable scan, tsc per tsconfig, knip]
   scan[code-scanning: upload the SARIF, holds security-events write, no project code]
@@ -235,11 +235,6 @@ tsconfig.<pr>.json       the pull request's file, unchanged (paths, moduleResolu
 test/tsconfig.json       generated the same way over test/tsconfig.<pr>.json
 ```
 
-### Assumptions
-
-- `job.workflow_repository` and `job.workflow_sha` resolve to this repository and its commit when an organization ruleset runs the workflow, as they do for `workflow_call`. The Verification Contract's ruleset path confirms it before merge; it is a stop condition otherwise.
-- thatsnotmynameio/github-actions stays public, so jobs in other repositories check it out without a token.
-
 ### Risks & Dependencies
 
 | Risk | Mitigation |
@@ -257,27 +252,23 @@ test/tsconfig.json       generated the same way over test/tsconfig.<pr>.json
 
 ### U1. The workflow's own tools
 
-**Goal:** a pinned, integrity-checked set of the tools the workflow runs, updated by Dependabot.
+**Goal:** the versions of the tools the workflow runs, as `python.yml` pins its own.
 
 **Requirements:** R9, R10, R15, R17; KTD2.
 
 **Dependencies:** none.
 
 **Files:**
-- `.github/typescript/package.json` (create)
-- `.github/typescript/pnpm-lock.yaml` (create)
-- `.github/dependabot.yml` (create: one `npm` entry for `/.github/typescript`, with a cooldown of at least one day and `commit-message.prefix: fix`; this repository's first Dependabot configuration)
+- `.github/workflows/typescript.yml` (top-level `env`)
 
 **Approach:**
-1. Declare oxlint, oxlint-tsgolint, oxfmt, knip and an istanbul coverage merger (`istanbul-lib-coverage` with a small reporter, or `nyc`) at exact versions at least 7 days old.
-2. Lock them with the same pnpm version KTD4 pins, under KTD3's policy.
+1. Pin oxlint, oxlint-tsgolint, oxfmt, knip, jsonc-parser and istanbul-lib-coverage in `env` at exact versions at least 7 days old.
+2. Each job installs the ones it runs with `pnpm install` from a `package.json` written in `$RUNNER_TEMP/tools`, under KTD3's policy.
 
-**Patterns to follow:** `python.yml`'s top-level `env` pins (lines 42-47) for what each tool is; PR #13's 7-day rule.
+**Patterns to follow:** `python.yml`'s top-level `env` pins (lines 42-47); PR #13's 7-day rule.
 
 **Test scenarios:**
-- Installing the directory frozen in an empty `$RUNNER_TEMP` with KTD3's environment succeeds and puts each tool's binary in `node_modules/.bin`.
-- Changing a version in `package.json` without relocking makes the frozen install fail.
-- A Dependabot pull request for the directory is titled with the `fix` prefix, and its `release / version` check shows a patch release.
+- Installing the tools by version in an empty `$RUNNER_TEMP/tools` with KTD3's environment succeeds and puts each tool's binary in `node_modules/.bin`.
 
 **Verification:** a frozen install of the directory succeeds offline from a warm store, and every version is at least 7 days old.
 
@@ -483,8 +474,7 @@ Each check step runs under `!cancelled()`, so one failure does not hide the next
 | Workflow lint | actionlint 1.7.12 (with shellcheck) and zizmor 1.30.1 `--persona=regular --no-ignores` report nothing, as `actionlint.yml` and `zizmor.yml` run them | U2-U7 |
 | Config validation | U2's `yq`/`jq` validators run on valid and invalid `.github/typescript.yml` inputs give the expected outputs and messages | U2 |
 | Scenario pull requests | a scratch TypeScript repository (Node 24, pnpm, TypeScript 7, Vitest 5, plus a Worker-template variant) calls this branch's `typescript.yml` through `workflow_call`, and one pull request per acceptance example and per unit scenario gives the stated outcome | U2-U6 |
-| Tools install | U1's directory installs frozen under KTD3's policy | U1 |
-| Ruleset path | before merge, a temporary organization ruleset in thatsnotmynameio/admin, targeting only the scratch repository and pinned to this branch's commit, requires `tnmn.io: typescript` on one scenario pull request; the run resolves `job.workflow_repository` and `job.workflow_sha` to this repository and branch commit and installs the tools. The ruleset is removed afterwards. The owner creates and removes it | U1-U6 |
+| Tools install | U1's versions install under KTD3's policy | U1 |
 | CodeQL matrix | the detection script for each manifest combination | U7 |
 
 The pull request body lists what was run locally, what ran on the scratch repository, and what is left for the first consumer, as PRs #13, #21 and #24 did.
@@ -493,9 +483,7 @@ The pull request body lists what was run locally, what ran on the scratch reposi
 
 - Every unit's verification holds, and each acceptance example AE1-AE12 has a scenario pull request with the stated outcome.
 - actionlint and zizmor report nothing on every changed workflow.
-- `job.workflow_sha` was confirmed on a ruleset run before merge (Verification Contract, ruleset path), and the temporary ruleset was removed; or the stop condition was reported.
 - The Vitest #11144 workaround was verified or the choice was brought back.
 - No experimental steps, debugging output or dead branches from abandoned approaches remain in the diff.
-- `tnmn.io: dependency-review` passes on the tools lockfile.
 - The pull request is titled `feat: …`, and its `release / version` check shows the minor bump its merge publishes.
 - The pull request names the follow-up: the admin ruleset pin, at the commit of that release.

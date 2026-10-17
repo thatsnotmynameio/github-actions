@@ -54,7 +54,8 @@ jobs:
   #   coverage: 90
   #   # Trunk Flaky Tests' test collections, by their 8-character IDs, each
   #   # with the pytest arguments that pick its tests (all of them without
-  #   # any). The tests run in a job of their own for each. None by default:
+  #   # any). The tests run in a job of their own for each, named after the
+  #   # arguments that are not options (tests without any). None by default:
   #   # the tests run in one job, and nothing goes to Trunk.
   #   trunk:
   #     - collection: AbC12345
@@ -62,7 +63,7 @@ jobs:
   #     - collection: XyZ98765
   #       pytest: [--ignore=tests/worker]
   setup:
-    name: "tnmn.io: python (setup)"
+    name: "tnmn.io: python / setup"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -120,7 +121,10 @@ jobs:
           sparse-checkout-cone-mode: false
       # Every value is checked here, so the jobs below can use them as they
       # are: a percentage, the collections, and the test jobs' matrix, one
-      # entry for each collection (or a single one, with no collection).
+      # entry for each collection (or a single one, with no collection). Each
+      # entry's label, which names its test and trunk jobs, is its pytest
+      # arguments that are not options, or tests without any: a job's name
+      # can call no function.
       - id: config
         name: Configuration from the base
         run: |
@@ -143,10 +147,15 @@ jobs:
                 or (.collection | type) != "string" or (.collection | test("^[A-Za-z0-9]{8}$") | not)
                 or (has("pytest") and ((.pytest | type) != "array" or any(.pytest[]; type != "string"))))
               then error("trunk: a list of {collection: an 8-character ID, pytest: a list of pytest arguments}") else . end
-            | to_entries | map({index: .key, collection: .value.collection, pytest: (.value.pytest // [])})
+            | to_entries | map({
+                index: .key,
+                collection: .value.collection,
+                pytest: (.value.pytest // []),
+                label: ((.value.pytest // []) | map(select(startswith("-") | not)) | join(" ") | if . == "" then "tests" else . end)
+              })
           ' <<< "$json")"
           if [ "$trunk" = "[]" ]; then
-            tests='[{"index":0,"collection":"","pytest":[]}]'
+            tests='[{"index":0,"collection":"","pytest":[],"label":"tests"}]'
             trunk=""
           else
             tests="$trunk"
@@ -159,7 +168,7 @@ jobs:
 
   # The lock, the format, the lint and the types.
   python:
-    name: "tnmn.io: python (lint)"
+    name: "tnmn.io: python / lint"
     needs: setup
     if: needs.setup.outputs.project == 'true'
     runs-on: ubuntu-latest
@@ -294,7 +303,7 @@ jobs:
   # its coverage data for the coverage job, and with a collection its JUnit
   # report (xunit1, which names each test's file) for the trunk job.
   test:
-    name: "tnmn.io: python (test${{ matrix.collection && format(' {0}', matrix.collection) || '' }})"
+    name: "tnmn.io: pytest / ${{ matrix.label }}"
     needs: setup
     if: needs.setup.outputs.project == 'true'
     runs-on: ubuntu-latest
@@ -358,7 +367,7 @@ jobs:
   # coverage report counts it, when every test job passed. Without coverage
   # data (no test file), there is nothing to check.
   coverage:
-    name: "tnmn.io: python (coverage)"
+    name: "tnmn.io: python / coverage"
     needs: [setup, test]
     if: needs.setup.outputs.coverage != ''
     runs-on: ubuntu-latest
@@ -397,7 +406,7 @@ jobs:
   # never fails the check. Upload alone: quarantining would need the token
   # where the tests run.
   trunk:
-    name: "tnmn.io: python (trunk ${{ matrix.collection }})"
+    name: "tnmn.io: trunk / upload / ${{ matrix.label }}"
     needs: [setup, test]
     if: ${{ !cancelled() && needs.setup.outputs.trunk != '' && needs.test.result != 'skipped' }}
     runs-on: ubuntu-latest
@@ -450,7 +459,7 @@ jobs:
   # and its image when it has a Dockerfile, published nowhere. A change that
   # breaks either fails here, not when it is released.
   build:
-    name: "tnmn.io: python (build)"
+    name: "tnmn.io: python / build"
     needs: setup
     if: needs.setup.outputs.project == 'true' && (needs.setup.outputs.package == 'true' || needs.setup.outputs.image == 'true')
     runs-on: ubuntu-latest

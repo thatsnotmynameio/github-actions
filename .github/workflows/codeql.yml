@@ -14,9 +14,12 @@
 #         security-events: write
 #       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 #
-# Its checks are "<caller job> / codeql (go)", "<caller job> / codeql
-# (python)", "<caller job> / codeql (javascript-typescript)" and "<caller
-# job> / codeql (actions)". Code scanning tells analyses apart by the
+# Its checks are "<caller job> / go", "<caller job> / python", "<caller
+# job> / javascript-typescript" and "<caller job> / actions", which a
+# caller's ruleset requires by name. Until the release that renamed them
+# they were "<caller job> / codeql (<language>)": a caller moving its pin
+# past it requires the new names in the same change, or its pull requests
+# wait for checks that never come. Code scanning tells analyses apart by the
 # caller's workflow and job, the category (/language:go, /language:python,
 # /language:javascript-typescript, /language:actions) and the matrix values
 # (language, build-mode): a change to any of them leaves the old analysis's
@@ -43,7 +46,7 @@ jobs:
   # JavaScript and TypeScript need no build: CodeQL reads their source as it
   # is.
   setup:
-    name: codeql (setup)
+    name: setup
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -74,7 +77,7 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   codeql:
-    name: codeql (${{ matrix.language }})
+    name: ${{ matrix.language }}
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 30

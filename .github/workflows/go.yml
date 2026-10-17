@@ -42,7 +42,7 @@ jobs:
   #   env:
   #     MY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/test?sslmode=disable
   setup:
-    name: "tnmn.io: go (setup)"
+    name: "tnmn.io: go / setup"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -135,7 +135,7 @@ jobs:
   # Linux alone starts the test services, so it alone checks the coverage
   # floor, and it uploads lint's findings, so code scanning gets them once.
   go:
-    name: "tnmn.io: go (${{ matrix.os }})"
+    name: "tnmn.io: go / ${{ matrix.os }}"
     needs: setup
     if: needs.setup.outputs.module == 'true'
     runs-on: ${{ matrix.runner }}
@@ -281,7 +281,7 @@ jobs:
   # binary, archives and checksums.txt in dist/, published nowhere. A change
   # that breaks the release build fails here, not when the release runs.
   snapshot:
-    name: "tnmn.io: go (snapshot)"
+    name: "tnmn.io: go / snapshot"
     needs: setup
     if: needs.setup.outputs.module == 'true' && needs.setup.outputs.goreleaser == 'true'
     runs-on: ubuntu-latest

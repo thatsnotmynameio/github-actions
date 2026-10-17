@@ -98,7 +98,8 @@ jobs:
   #   coverage-provider: v8
   #   # Trunk Flaky Tests' test collections, by their 8-character IDs, each
   #   # with the vitest arguments that pick its tests (all of them without
-  #   # any). The tests run in a job of their own for each. None by default:
+  #   # any). The tests run in a job of their own for each, named after the
+  #   # arguments that are not options (tests without any). None by default:
   #   # the tests run in one job, and nothing goes to Trunk.
   #   trunk:
   #     - collection: AbC12345
@@ -114,7 +115,7 @@ jobs:
   #     - tarball: https://codeload.github.com/someone/bar/tar.gz/0123456789abcdef0123456789abcdef01234567
   #       integrity: sha512-...
   setup:
-    name: "tnmn.io: typescript (setup)"
+    name: "tnmn.io: typescript / setup"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -196,6 +197,9 @@ jobs:
       # TypeScript major, and the base's exceptions to pnpm's policy, in
       # base64, since an allowBuilds key can be a URL. A key the base's
       # allowBuilds leaves unanswered (pnpm's placeholder) allows nothing.
+      # Each matrix entry's label, which names its test and trunk jobs, is
+      # its vitest arguments that are not options, or tests without any: a
+      # job's name can call no function.
       - id: config
         name: Configuration from the base
         env:
@@ -233,10 +237,15 @@ jobs:
                 or (.collection | type) != "string" or (.collection | test("^[A-Za-z0-9]{8}$") | not)
                 or (has("vitest") and ((.vitest | type) != "array" or any(.vitest[]; type != "string"))))
               then error("trunk: a list of {collection: an 8-character ID, vitest: a list of vitest arguments}") else . end
-            | to_entries | map({index: .key, collection: .value.collection, vitest: (.value.vitest // [])})
+            | to_entries | map({
+                index: .key,
+                collection: .value.collection,
+                vitest: (.value.vitest // []),
+                label: ((.value.vitest // []) | map(select(startswith("-") | not)) | join(" ") | if . == "" then "tests" else . end)
+              })
           ' <<< "$json")"
           if [ "$trunk" = "[]" ]; then
-            tests='[{"index":0,"collection":"","vitest":[]}]'
+            tests='[{"index":0,"collection":"","vitest":[],"label":"tests"}]'
             trunk=""
           else
             tests="$trunk"
@@ -361,7 +370,7 @@ jobs:
   # scanning from the code-scanning job. Its install runs no dependency
   # script: none of these needs one.
   typescript:
-    name: "tnmn.io: typescript (lint)"
+    name: "tnmn.io: typescript / lint"
     needs: setup
     if: needs.setup.outputs.project == 'true'
     runs-on: ubuntu-latest
@@ -831,7 +840,7 @@ jobs:
   # repository without GitHub Code Security has no code scanning: there the
   # findings only show in the log.
   code-scanning:
-    name: "tnmn.io: typescript (code scanning)"
+    name: "tnmn.io: typescript / code scanning"
     needs: [setup, typescript]
     if: ${{ !cancelled() && needs.setup.outputs.project == 'true' && !github.event.repository.private }}
     runs-on: ubuntu-latest
@@ -871,7 +880,7 @@ jobs:
   # a floor, each job keeps its coverage data for the coverage job, and with
   # a collection its JUnit report for the trunk job.
   test:
-    name: "tnmn.io: typescript (test${{ matrix.collection && format(' {0}', matrix.collection) || '' }})"
+    name: "tnmn.io: vitest / ${{ matrix.label }}"
     needs: setup
     if: needs.setup.outputs.project == 'true'
     runs-on: ubuntu-latest
@@ -985,7 +994,7 @@ jobs:
   # deleted), it fails: a floor needs tests. A threshold in the project's
   # Vitest configuration plays no part. It runs none of the project's code.
   coverage:
-    name: "tnmn.io: typescript (coverage)"
+    name: "tnmn.io: typescript / coverage"
     needs: [setup, test]
     if: needs.setup.outputs.coverage != ''
     runs-on: ubuntu-latest
@@ -1061,7 +1070,7 @@ jobs:
   # failed upload never fails the check. Upload alone: quarantining would
   # need the token where the tests run.
   trunk:
-    name: "tnmn.io: typescript (trunk ${{ matrix.collection }})"
+    name: "tnmn.io: trunk / upload / ${{ matrix.label }}"
     needs: [setup, test]
     if: ${{ !cancelled() && needs.setup.outputs.trunk != '' && needs.test.result != 'skipped' }}
     runs-on: ubuntu-latest
@@ -1116,7 +1125,7 @@ jobs:
   # not when it is released. No cache, as in a release: the build reads
   # nothing another workflow could have written.
   build:
-    name: "tnmn.io: typescript (build)"
+    name: "tnmn.io: typescript / build"
     needs: setup
     if: needs.setup.outputs.project == 'true' && (needs.setup.outputs.build == 'true' || needs.setup.outputs.image == 'true')
     runs-on: ubuntu-latest

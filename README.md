@@ -90,7 +90,7 @@ jobs:
     uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 ```
 
-Its checks are `codeql / codeql (go)`, `codeql / codeql (python)`, `codeql / codeql (javascript-typescript)` and `codeql / codeql (actions)`, for a caller job named `codeql`, and the repository's ruleset requires them. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
+Its checks are `codeql / go`, `codeql / python`, `codeql / javascript-typescript` and `codeql / actions`, for a caller job named `codeql`, and the repository's ruleset requires them by name. Before the release that renamed them they were `codeql / codeql (<language>)`: a repository moving its pin past that release requires the new names in the same change (its required checks in thatsnotmynameio/admin's `.github/repos/<repo>.yml`), or its pull requests wait for checks that never come. Pull requests still on the old pin then need their branch updated. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
 
 ## Go
 
@@ -216,7 +216,9 @@ jobs:
 
 ### Trunk Flaky Tests
 
-With `trunk`, the tests run in a job of their own for each collection (`tnmn.io: python (test <collection>)`), pytest with that collection's arguments: the repository decides how its tests split, by directory, marker or anything pytest selects, and that no test lands in two collections or in none. A collection whose arguments select no test passes. Each job's JUnit report then goes to its collection through Trunk's uploader (`trunk-io/analytics-uploader`), in a job of its own (`tnmn.io: python (trunk <collection>)`): the only job that holds Trunk's token, and it runs none of the pull request's code. Without `trunk`, the tests run in one job (`tnmn.io: python (test)`) and nothing goes to Trunk.
+With `trunk`, the tests run in a job of their own for each collection, pytest with that collection's arguments: the repository decides how its tests split, by directory, marker or anything pytest selects, and that no test lands in two collections or in none. A collection whose arguments select no test passes. Each job's JUnit report then goes to its collection through Trunk's uploader (`trunk-io/analytics-uploader`), in a job of its own: the only job that holds Trunk's token, and it runs none of the pull request's code. Without `trunk`, the tests run in one job and nothing goes to Trunk.
+
+The jobs are named after the arguments that are not options: `tnmn.io: pytest / tests/integration` and `tnmn.io: trunk / upload / tests/integration` for `pytest: [tests/integration]`, and `tnmn.io: pytest / tests` for a collection with no such argument, or without `trunk`. Give an option its value with `=` (`--ignore=tests/integration`, not `--ignore tests/integration`) so the value stays out of the name. Collections split by marker alone share the name `tests`.
 
 The collections are created in Trunk's app, which holds their monitors, quarantining and ticketing. The organization holds Trunk's token in the `TRUNK_API_TOKEN` secret and its slug in the `TRUNK_ORG_URL_SLUG` variable. Without them (on a Dependabot or a fork's pull request, for instance), nothing is sent, and a failed upload never fails the check.
 
@@ -284,7 +286,7 @@ knip fails the check when production code imports a package declared only in `de
 
 The tests run with the project's own Vitest; a project without test files passes. Coverage, with the base's provider, measures `src/` when the project has it and the whole project otherwise, test, declaration and configuration files left out, whatever the project's Vitest configuration includes, excludes or names as its provider. The coverage job checks the floor over every test job's data, and fails when there is none: a floor needs tests. A threshold in the project's Vitest configuration plays no part. The build job runs the `build` script when `package.json` has one, and `docker build` when the repository has a `Dockerfile`. Known vulnerabilities in the dependencies are `tnmn.io: grype`'s, which reads `pnpm-lock.yaml`.
 
-oxlint's findings go to code scanning under the category `oxlint`, from a job of their own (`tnmn.io: typescript (code scanning)`): the lint job runs the project's TypeScript and knip loads the project's configuration files, so it holds no write permission. Code scanning compares a pull request with the analysis of `main`, so a TypeScript repository also runs the workflow on each push to `main`:
+oxlint's findings go to code scanning under the category `oxlint`, from a job of their own (`tnmn.io: typescript / code scanning`): the lint job runs the project's TypeScript and knip loads the project's configuration files, so it holds no write permission. Code scanning compares a pull request with the analysis of `main`, so a TypeScript repository also runs the workflow on each push to `main`:
 
 ```yaml
 # .github/workflows/ci.yml
@@ -305,6 +307,6 @@ jobs:
       TRUNK_API_TOKEN: ${{ secrets.TRUNK_API_TOKEN }}
 ```
 
-With `trunk`, the tests run and go to Trunk as they do for Python (see [Trunk Flaky Tests](#trunk-flaky-tests)), with each collection's `vitest` arguments, in jobs named `tnmn.io: typescript (test <collection>)` and `tnmn.io: typescript (trunk <collection>)`.
+With `trunk`, the tests run and go to Trunk as they do for Python (see [Trunk Flaky Tests](#trunk-flaky-tests)), with each collection's `vitest` arguments, in jobs named `tnmn.io: vitest / <arguments>` and `tnmn.io: trunk / upload / <arguments>`, after the arguments that are not options (`tnmn.io: vitest / tests` without any, or without `trunk`).
 
 The tools the workflow runs (oxlint, tsgolint, oxfmt, knip) are at the versions in its `env`, as Python's are, and each job installs them under the same policy.

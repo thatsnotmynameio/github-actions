@@ -10,10 +10,14 @@
 #   jobs:
 #     codeql:
 #       permissions:
+#         actions: read
 #         contents: read
 #         security-events: write
 #       uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 #
+# actions: read is CodeQL's: its analyze and upload read the workflow run,
+# which a private repository's token reaches only with it. A caller that
+# grants less fails to start the workflow.
 # Its checks are "<caller job> / go", "<caller job> / python", "<caller
 # job> / javascript-typescript" and "<caller job> / actions", which a
 # caller's ruleset requires by name. Until the release that renamed them
@@ -28,7 +32,10 @@
 # commit, never from the pull request: a pull request cannot exclude a path or
 # a query for itself. Without one, the security-extended suite runs.
 # Its alerts do not fail the jobs: a code_scanning rule does. A job fails on
-# a build or analysis error, and then uploads nothing. No job holds a secret:
+# a build or analysis error, and then uploads nothing. A repository without
+# GitHub Code Security (a private one without the license) has no code
+# scanning: there the findings only show as annotations and in the job's log,
+# and never fail it. No job holds a secret:
 # code scanning accepts an upload from any run that the pull_request event
 # started, a fork's included, with the read-only token.
 name: codeql
@@ -82,6 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      actions: read # CodeQL reads the workflow run, on a private repository too
       contents: read
       security-events: write # uploads the results to code scanning
     # A pull request's newer run replaces the older one. Each main commit gets
@@ -186,7 +194,42 @@ jobs:
                 exit 1
               }
             }'
-      - uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      # Code scanning needs GitHub Code Security: without it, its API answers
+      # that Code Security (or Advanced Security) must be enabled, and an
+      # upload would fail. Any other answer, an error included, uploads.
+      - id: scanning
+        name: Code scanning
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          response="$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses?per_page=1" 2> /dev/null || true)"
+          if jq -e 'type == "object" and ((.message // "") | test("(Code|Advanced) Security must be enabled"))' <<< "$response" > /dev/null 2>&1; then
+            echo "::notice::No GitHub Code Security in this repository: the findings show as annotations, not in code scanning."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
+      # Without code scanning, each finding becomes a warning annotation on its
+      # file and line.
+      - name: findings
+        if: steps.scanning.outputs.upload == 'false'
+        run: |
+          shopt -s nullglob
+          sarif=("$RUNNER_TEMP"/codeql-results/*.sarif)
+          if [ "${#sarif[@]}" -eq 0 ]; then
+            echo "No SARIF file."
+            exit 0
+          fi
+          jq -r '
+            def data: gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A");
+            def property: data | gsub(":"; "%3A") | gsub(","; "%2C");
+            .runs[].results[]?
+            | (.locations[0].physicalLocation // {}) as $l
+            | "::warning file=\(($l.artifactLocation.uri // "") | property),line=\($l.region.startLine // 1),title=\("CodeQL \(.ruleId // "finding")" | property)::\((.message.text // "") | data)"
+          ' "${sarif[@]}"
+          echo "findings: $(jq -s '[.[].runs[].results[]?] | length' "${sarif[@]}")"
+      - if: steps.scanning.outputs.upload == 'true'
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/codeql-results
           category: /language:${{ matrix.language }}

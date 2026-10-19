@@ -85,10 +85,13 @@ permissions: {}
 jobs:
   codeql:
     permissions:
+      actions: read
       contents: read
       security-events: write
     uses: thatsnotmynameio/github-actions/.github/workflows/codeql.yml@<sha> # vX.Y.Z
 ```
+
+`actions: read` is CodeQL's: its analyze and upload read the workflow run, which a private repository's token reaches only with it. Since the release that asks for it, a caller that grants less fails to start the workflow, so a repository moving its pin past that release adds it in the same change. A repository without GitHub Code Security (a private one without the license) has no code scanning: there each finding shows as a warning annotation and in the job's log, never fails the check, and nothing uploads.
 
 Its checks are `codeql / go`, `codeql / python`, `codeql / javascript-typescript` and `codeql / actions`, for a caller job named `codeql`, and the repository's ruleset requires them by name. Before the release that renamed them they were `codeql / codeql (<language>)`: a repository moving its pin past that release requires the new names in the same change (its required checks in thatsnotmynameio/admin's `.github/repos/<repo>.yml`), or its pull requests wait for checks that never come. Pull requests still on the old pin then need their branch updated. CodeQL's configuration (`.github/codeql/codeql-config.yml`) comes from the base commit. Without one, the suite runs as is. Code scanning tells analyses apart by the caller's workflow and job, the category and the matrix values: renaming any of them leaves the old analysis's alerts open on `main`.
 

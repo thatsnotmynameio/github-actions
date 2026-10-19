@@ -115,7 +115,18 @@ jobs:
           # - caniuse-lite, browser data from browserslist, which babel, under
           #   Vitest's Istanbul coverage, depends on: CC-BY-4.0, a Creative
           #   Commons license, meant for data, not code. GitLab approves it.
+          # - mdn-data, CSS data from MDN, through css-tree, which jsdom (and
+          #   so Vitest's DOM environment) depends on: CC0-1.0, a public
+          #   domain dedication, meant for data, not code. polarsource/polar,
+          #   PostHog/posthog, vercel/next.js and vitest-dev/vitest have it in
+          #   their lockfiles.
+          # - @fontsource-variable/inter, the Inter typeface, which an app
+          #   bundles to render offline: OFL-1.1, the SIL Open Font License,
+          #   which allows bundling and selling the font with software but
+          #   not selling it on its own. PostHog/posthog and twentyhq/twenty
+          #   ship Inter through Fontsource, and most open fonts are OFL-1.1.
           allow-dependencies-licenses: >-
+            pkg:npm/%40fontsource-variable/inter,
             pkg:npm/caniuse-lite,
             pkg:npm/lightningcss,
             pkg:npm/lightningcss-android-arm64,
@@ -129,6 +140,7 @@ jobs:
             pkg:npm/lightningcss-linux-x64-musl,
             pkg:npm/lightningcss-win32-arm64-msvc,
             pkg:npm/lightningcss-win32-x64-msvc,
+            pkg:npm/mdn-data,
             pkg:pypi/aiohappyeyeballs,
             pkg:pypi/certifi,
             pkg:pypi/greenlet,

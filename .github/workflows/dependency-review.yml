@@ -79,12 +79,15 @@ jobs:
           # no more than a notice. LicenseRef-scancode-google-patent-license-golang
           # is Go's golang.org/x modules', with BSD-3-Clause. PSF-2.0, the Python
           # Software Foundation's, is permissive too: it asks for the notice and
-          # a summary of any changes. No copyleft license is on the list: adding
-          # one, or any other license, is a decision made here.
+          # a summary of any changes. Unlicense dedicates the code to the public
+          # domain, with a permissive license as the fallback where a dedication
+          # doesn't hold, and asks for nothing, not even the notice; isbot, which
+          # @tanstack/react-router depends on, uses it. No copyleft license is on
+          # the list: adding one, or any other license, is a decision made here.
           # Development dependencies are checked too: with pnpm-lock.yaml,
           # GitHub reports every package as runtime, even a devDependency, so
           # a license only development needs is exempted by package below.
-          allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, PSF-2.0, LicenseRef-scancode-google-patent-license-golang
+          allow-licenses: MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, 0BSD, PSF-2.0, Unlicense, LicenseRef-scancode-google-patent-license-golang
           # Packages whose license is not checked against the list, which
           # stays as it is. PostHog (PostHog/posthog's uv.lock) and Polar
           # (polarsource/polar's server/uv.lock) ship all six; PostHog/viaduck

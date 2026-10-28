@@ -123,13 +123,15 @@ jobs:
           #   domain dedication, meant for data, not code. polarsource/polar,
           #   PostHog/posthog, vercel/next.js and vitest-dev/vitest have it in
           #   their lockfiles.
-          # - @fontsource-variable/inter, the Inter typeface, which an app
-          #   bundles to render offline: OFL-1.1, the SIL Open Font License,
-          #   which allows bundling and selling the font with software but
-          #   not selling it on its own. PostHog/posthog and twentyhq/twenty
-          #   ship Inter through Fontsource, and most open fonts are OFL-1.1.
+          # - @fontsource-variable/jetbrains-mono and
+          #   @fontsource-variable/source-sans-3, the JetBrains Mono and
+          #   Source Sans 3 typefaces, which an app bundles to render
+          #   offline: OFL-1.1, the SIL Open Font License, which allows
+          #   bundling and selling the font with software but not selling it
+          #   on its own. Most open fonts are OFL-1.1.
           allow-dependencies-licenses: >-
-            pkg:npm/%40fontsource-variable/inter,
+            pkg:npm/%40fontsource-variable/jetbrains-mono,
+            pkg:npm/%40fontsource-variable/source-sans-3,
             pkg:npm/caniuse-lite,
             pkg:npm/lightningcss,
             pkg:npm/lightningcss-android-arm64,

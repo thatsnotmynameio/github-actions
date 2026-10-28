@@ -129,9 +129,13 @@ jobs:
           #   offline: OFL-1.1, the SIL Open Font License, which allows
           #   bundling and selling the font with software but not selling it
           #   on its own. Most open fonts are OFL-1.1.
+          # - axe-core, Deque's accessibility engine, from
+          #   @storybook/addon-a11y, a development tool that checks each
+          #   story: MPL-2.0, as pathspec.
           allow-dependencies-licenses: >-
             pkg:npm/%40fontsource-variable/jetbrains-mono,
             pkg:npm/%40fontsource-variable/source-sans-3,
+            pkg:npm/axe-core,
             pkg:npm/caniuse-lite,
             pkg:npm/lightningcss,
             pkg:npm/lightningcss-android-arm64,
